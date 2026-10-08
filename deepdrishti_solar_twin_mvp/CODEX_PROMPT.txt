@@ -1,0 +1,10 @@
+I uploaded DeepDrishti_Solar_Twin_MVP.zip. Treat it as an existing working application, not a blank project.
+
+Unzip it, enter deepdrishti_solar_twin_mvp, read README.md and docs/ARCHITECTURE.md, create a Python virtual environment, install requirements.txt, and run pytest -q. Fix only genuine environment or compatibility issues; do not replace the application with a simpler scaffold.
+
+Start it with:
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+Open the browser preview for port 8000 and verify: Portfolio, Site dashboard, Digital Twin map/list/table and filters, anomaly RGB/thermal drawer, work-order creation, task update to Verified resolving the linked anomaly, Inspections > Analyze imagery > Run bundled sample creating new mapped findings, Field app, Assets, and /docs.
+
+Preserve the DeepDrishti design, seed data, SQLite persistence and complete workflow. Do not copy proprietary Raptor Maps assets, branding or code. Once running, give me the preview URL, test results, exact commands, and any necessary changes you made.

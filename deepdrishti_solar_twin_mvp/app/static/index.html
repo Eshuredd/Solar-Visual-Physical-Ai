@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#07130e" />
+  <meta name="description" content="DeepDrishti Solar Twin — runnable solar-farm visual AI and digital twin MVP." />
+  <title>DeepDrishti Solar Twin</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%239dff75%22/><path d=%22M16 39c10-22 22-22 32 0-10 11-22 11-32 0Z%22 fill=%22%2310251c%22/><circle cx=%2232%22 cy=%2234%22 r=%226%22 fill=%22%239dff75%22/></svg>" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="boot-screen" class="boot-screen">
+    <div class="boot-mark">
+      <div class="boot-eye"></div>
+    </div>
+    <div class="boot-copy">
+      <strong>DeepDrishti Solar Twin</strong>
+      <span>Loading the physical intelligence layer…</span>
+    </div>
+  </div>
+
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-wrap">
+        <img src="/static/assets/logo.svg" alt="DeepDrishti Solar Twin" class="brand-logo" />
+        <button class="icon-button sidebar-close" aria-label="Close navigation" onclick="toggleSidebar(false)">×</button>
+      </div>
+      <nav id="primary-nav" class="primary-nav" aria-label="Primary navigation"></nav>
+      <div class="sidebar-spacer"></div>
+      <div class="system-card">
+        <div class="system-card-top">
+          <span class="status-dot"></span>
+          <span>System operational</span>
+        </div>
+        <div class="system-card-row"><span>Vision engine</span><strong>v0.3</strong></div>
+        <div class="system-card-row"><span>Last sync</span><strong>Live</strong></div>
+      </div>
+      <button class="nav-item support-item" onclick="showAbout()">
+        <span class="nav-icon">?</span><span>About this MVP</span>
+      </button>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" aria-label="Open navigation" onclick="toggleSidebar(true)">☰</button>
+          <div>
+            <div id="breadcrumb" class="breadcrumb"></div>
+            <h1 id="page-title">Portfolio overview</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <label class="site-picker-wrap">
+            <span>Active site</span>
+            <select id="site-picker" class="site-picker" onchange="selectSite(this.value)"></select>
+          </label>
+          <button class="search-trigger" onclick="openCommandPalette()" aria-label="Open command palette">
+            <span>⌕</span><span class="search-copy">Search assets or commands</span><kbd>⌘ K</kbd>
+          </button>
+          <button class="icon-button notification-button" aria-label="Notifications" onclick="showToast('No new critical alerts', 'success')">
+            <span>◌</span><i></i>
+          </button>
+          <button class="user-chip" onclick="showToast('Demo user: Solar Operations Lead')">
+            <span class="avatar">DS</span>
+            <span class="user-copy"><strong>Demo User</strong><small>Operations lead</small></span>
+          </button>
+        </div>
+      </header>
+      <main id="content" class="content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div id="overlay-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  <script src="/static/app.js?v=0.3.1" defer></script>
+</body>
+</html>

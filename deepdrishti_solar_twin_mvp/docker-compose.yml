@@ -1,0 +1,13 @@
+services:
+  solar-twin:
+    build: .
+    ports:
+      - "8002:8000"
+    volumes:
+      - solar_twin_data:/app/app/data
+      - solar_twin_uploads:/app/app/static/uploads
+    restart: unless-stopped
+
+volumes:
+  solar_twin_data:
+  solar_twin_uploads:
