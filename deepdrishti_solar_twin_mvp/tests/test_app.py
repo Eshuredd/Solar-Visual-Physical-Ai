@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 from pathlib import Path
+
+import pytest
 
 TEST_DB = Path(tempfile.gettempdir()) / "deepdrishti_solar_twin_test.db"
 if TEST_DB.exists():
@@ -11,7 +14,13 @@ os.environ["SOLAR_TWIN_DB"] = str(TEST_DB)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import init_db  # noqa: E402
+from app.db import connect, init_db  # noqa: E402
+from app.inverter_monitoring import (  # noqa: E402
+    classify_status,
+    conversion_efficiency_pct,
+    relative_yield_pct,
+    validate_telemetry,
+)
 from app.main import app  # noqa: E402
 
 
@@ -94,3 +103,129 @@ def test_csv_export_and_frontend() -> None:
         frontend = client.get("/")
         assert frontend.status_code == 200
         assert "DeepDrishti Solar Twin" in frontend.text
+
+
+def test_synthetic_telemetry_generation_and_persistence() -> None:
+    init_db(reset=True)
+    with connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM inverters WHERE site_id = 'site-001'").fetchone()[0] == 12
+        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96
+        row = dict(conn.execute(
+            "SELECT * FROM inverter_telemetry WHERE inverter_id = 'site-001-INV-01' AND irradiance_w_m2 > 500 LIMIT 1"
+        ).fetchone())
+        assert row["data_source"] == "synthetic_demo_v1"
+        assert row["dc_power_kw"] >= row["ac_power_kw"]
+        assert abs(row["dc_power_kw"] * 1000 - row["dc_voltage_v"] * row["dc_current_a"]) < 2
+        assert abs(row["ac_power_kw"] * 1000 - (3 ** 0.5) * row["ac_voltage_v"] * row["ac_current_a"] * 0.99) < 2
+
+
+def test_inverter_apis_and_date_ranges() -> None:
+    with make_client() as client:
+        listing = client.get("/api/sites/site-001/inverters")
+        assert listing.status_code == 200
+        assert len(listing.json()) == 12
+        assert all(item["data_source"] == "synthetic_demo" for item in listing.json())
+
+        detail = client.get("/api/inverters/site-001-INV-07")
+        assert detail.status_code == 200
+        assert detail.json()["summary"]["status"] == "Critical"
+        assert detail.json()["summary"]["data_classification"] == "synthetic_demo"
+
+        telemetry = client.get(
+            "/api/inverters/site-001-INV-01/telemetry?start=2026-08-07&end=2026-08-07"
+        )
+        assert telemetry.status_code == 200
+        payload = telemetry.json()
+        assert payload["count"] == 96
+        assert "expected_ac_power_kw" in payload["readings"][48]
+        assert "conversion_efficiency_pct" in payload["readings"][48]
+
+        summary = client.get(
+            "/api/inverters/site-001-INV-01/summary?start=2026-08-07&end=2026-08-08"
+        )
+        assert summary.status_code == 200
+        assert summary.json()["actual_energy_kwh"] > 0
+        assert summary.json()["expected_energy_kwh"] > 0
+        assert client.get("/api/inverters/unknown").status_code == 404
+        assert client.get("/api/inverters/site-001-INV-01/summary?start=bad-date").status_code == 400
+        assert client.get("/api/inverters/site-001-INV-01/summary?start=2026-08-08&end=2026-08-07").status_code == 400
+
+
+def test_efficiency_relative_yield_and_operating_guards() -> None:
+    assert conversion_efficiency_pct(100, 96) == 96.0
+    assert conversion_efficiency_pct(0, 0) is None
+    daylight = [{
+        "timestamp": "2026-08-07T12:00:00Z", "dc_power_kw": 940.0, "ac_power_kw": 900.0,
+        "irradiance_w_m2": 1000.0, "inverter_temperature_c": 25.0, "operating_state": "Running",
+    }]
+    assert relative_yield_pct(daylight, 1000.0) == 90.0
+    assert classify_status(90.0, daylight[0]) == "Healthy"
+
+    excluded = [
+        {"ac_power_kw": 0, "irradiance_w_m2": 0, "inverter_temperature_c": 20, "operating_state": "Night"},
+        {"ac_power_kw": 0, "irradiance_w_m2": 40, "inverter_temperature_c": 22, "operating_state": "Startup"},
+        {"ac_power_kw": 0, "irradiance_w_m2": 800, "inverter_temperature_c": 40, "operating_state": "Curtailment"},
+    ]
+    assert relative_yield_pct(excluded, 1000.0) is None
+    assert classify_status(None, excluded[0]) == "Night"
+    assert classify_status(None, excluded[2]) == "Curtailed"
+
+
+def test_underperformance_missing_and_invalid_telemetry() -> None:
+    with make_client() as client:
+        underperformer = client.get("/api/inverters/site-001-INV-07/summary").json()
+        intermittent = client.get("/api/inverters/site-001-INV-12/summary").json()
+        normal = client.get("/api/inverters/site-001-INV-01/summary").json()
+        assert underperformer["relative_yield_pct"] < 75
+        assert any(item["code"] == "LOW_RELATIVE_YIELD" for item in underperformer["indicators"])
+        assert any(item["code"] == "ABNORMAL_OPERATING_STATE" for item in intermittent["indicators"])
+        assert normal["status"] == "Healthy"
+
+    invalid = {
+        "dc_power_kw": -1, "ac_power_kw": 100, "dc_voltage_v": 500, "dc_current_a": 1,
+        "ac_voltage_v": 690, "ac_current_a": 1, "inverter_temperature_c": 30,
+        "ambient_temperature_c": 20, "irradiance_w_m2": 1700,
+    }
+    errors = validate_telemetry(invalid)
+    assert any("dc_power_kw" in error for error in errors)
+    assert any("irradiance_w_m2" in error for error in errors)
+    with connect() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO inverter_telemetry VALUES
+               ('site-001-INV-01','2099-01-01T00:00:00Z',-1,0,0,0,0,0,20,20,0,'Night','test')"""
+        )
+
+
+def test_site_isolation_and_idempotent_initialization_without_data_loss() -> None:
+    init_db(reset=True)
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO sites VALUES
+               ('site-test','Isolation Site','Test',1.0,'Healthy','2026-01-01',0,0,100,'Test Owner','2026-01-01')"""
+        )
+        conn.execute(
+            """INSERT INTO inverters VALUES
+               ('site-test-INV-01','site-test','INV-01',1000,'Test','Model','Operational','T1','synthetic_demo')"""
+        )
+        conn.commit()
+    init_db()
+    with TestClient(app) as client:
+        isolated = client.get("/api/sites/site-test/inverters")
+        assert isolated.status_code == 200
+        assert [item["inverter_id"] for item in isolated.json()] == ["site-test-INV-01"]
+        assert client.get("/api/sites/site-001/inverters").json()[0]["site_id"] == "site-001"
+    with connect() as conn:
+        assert conn.execute("SELECT owner FROM sites WHERE id = 'site-test'").fetchone()[0] == "Test Owner"
+        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96
+
+
+def test_existing_application_views_and_site_apis_still_respond() -> None:
+    with make_client() as client:
+        for path in [
+            "/api/sites", "/api/sites/site-001", "/api/sites/site-001/anomalies",
+            "/api/sites/site-001/inspections", "/api/sites/site-001/assets",
+            "/api/tasks?site_id=site-001", "/site", "/twin", "/inspections",
+            "/tasks", "/assets",
+        ]:
+            response = client.get(path)
+            assert response.status_code == 200, path

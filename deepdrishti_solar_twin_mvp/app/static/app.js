@@ -12,6 +12,7 @@ const state = {
   assets: null,
   drawerId: null,
   drawerData: null,
+  inverterPanel: null,
   modal: null,
   uploadFile: null,
   twinView: "map",
@@ -194,6 +195,7 @@ function navigate(view) {
   state.drawerId = null;
   state.drawerData = null;
   state.modal = null;
+  state.inverterPanel = null;
   state.commandOpen = false;
   renderNav();
   render();
@@ -207,6 +209,7 @@ async function selectSite(siteId) {
     state.filters = { priority: "All", status: "Active", type: "All", query: "" };
     state.drawerId = null;
     state.drawerData = null;
+    state.inverterPanel = null;
     populateSitePicker();
     renderNav();
     render();
@@ -371,6 +374,7 @@ function recommendationRow(title, subtitle, label, value, action) {
 function renderSiteDashboard() {
   setPage(state.site.name, `Solar intelligence / ${state.site.region}`);
   const activeTasks = state.tasks.filter(t => !["Completed", "Verified"].includes(t.status));
+  const inverterAlerts = state.site.inverters.filter(inverter => ["Critical", "Watch"].includes(inverter.status)).length;
   return `
     <div class="page-stack">
       <section class="page-header">
@@ -394,12 +398,14 @@ function renderSiteDashboard() {
 
       <section class="dashboard-grid">
         <article class="panel">
-          <header class="panel-header"><div><h3>Inverter relative yield</h3><p>Visual + operational context mapped to the same site twin</p></div><span class="tag warning">1 critical inverter</span></header>
+          <header class="panel-header"><div><h3>Inverter relative yield</h3><p>Irradiance and temperature-normalized · synthetic demo telemetry</p></div><span class="tag warning">${inverterAlerts} inverter${inverterAlerts===1?'':'s'} to review</span></header>
           <div class="panel-body">
-            <div class="heatmap-grid">${state.site.inverters.map(inverter => {
-              const cls = inverter.yield >= 95 ? "heat-excellent" : inverter.yield >= 90 ? "heat-good" : inverter.yield >= 75 ? "heat-watch" : "heat-critical";
-              return `<button class="heat-cell ${cls}" onclick="showToast('${inverter.id}: ${inverter.yield}% relative yield')"><span>${inverter.id}</span><strong>${formatNumber(inverter.yield,1)}%</strong></button>`;
-            }).join("")}</div>
+            ${state.site.inverters.length ? `<div class="heatmap-grid">${state.site.inverters.map(inverter => {
+              const value = inverter.yield;
+              const cls = value == null ? "heat-empty" : value >= 95 ? "heat-excellent" : value >= 90 ? "heat-good" : value >= 75 ? "heat-watch" : "heat-critical";
+              return `<button class="heat-cell ${cls}" onclick="openInverter('${inverter.inverter_id}')" aria-label="Open ${escapeHtml(inverter.id)} monitoring details"><span>${escapeHtml(inverter.id)}</span><strong>${value == null ? 'No data' : `${formatNumber(value,1)}%`}</strong><small>${escapeHtml(inverter.status)}</small></button>`;
+            }).join("")}</div>` : `<div class="empty-state"><div><strong>No inverter data</strong><p>No monitored inverters are configured for this site.</p></div></div>`}
+            <div class="synthetic-notice">${icon("info")} Simulated readings for product demonstration only — not live SCADA data or a fault diagnosis.</div>
           </div>
         </article>
         <article class="panel">
@@ -427,7 +433,7 @@ function renderSiteDashboard() {
               <div class="detail-metric"><span>Coordinates</span><strong style="font-size:12px">${state.site.latitude.toFixed(3)}, ${state.site.longitude.toFixed(3)}</strong></div>
               <div class="detail-metric"><span>Modules</span><strong>${formatNumber(state.assets.hierarchy.modules)}</strong></div>
             </div>
-            <div class="recommendation" style="margin-top:14px"><strong>Visual + SCADA correlation</strong><p>INV-07 is operating at 36.3% relative yield. The Digital Twin currently shows critical string and wiring findings in linked blocks. Review the physical evidence before dispatching field work.</p></div>
+            <div class="recommendation" style="margin-top:14px"><strong>Electrical and visual evidence remain separate</strong><p>The inverter indicators use synthetic electrical telemetry. Thermal and visual findings stay linked to physical assets independently; a reviewer must establish evidence before creating a diagnosis or dispatching field work.</p></div>
           </div>
         </article>
       </section>
@@ -595,6 +601,77 @@ function findingRow(item) {
 
 function renderAnomalyTable(items) {
   return `<div class="map-stage" style="overflow:auto;background:#081711"><table class="data-table"><thead><tr><th>Asset</th><th>Anomaly</th><th>Priority</th><th>Status</th><th>Confidence</th><th>ΔT</th><th>Affected kW</th><th>Annual impact</th><th></th></tr></thead><tbody>${items.map(item=>`<tr><td class="mono">${escapeHtml(item.asset_id)}</td><td><span class="table-title"><strong>${escapeHtml(item.anomaly_type)}</strong><small>${escapeHtml(item.category)}</small></span></td><td>${priorityPill(item.priority)}</td><td>${statusPill(item.status)}</td><td>${Math.round(item.confidence*100)}%</td><td>${item.delta_t?`${item.delta_t}°C`:'—'}</td><td>${formatNumber(item.affected_kw,2)}</td><td>${formatCurrency(item.annual_revenue_loss)}</td><td><button class="button small" onclick="openAnomaly('${item.id}')">Review</button></td></tr>`).join("")}</tbody></table></div>`;
+}
+
+async function openInverter(inverterId) {
+  state.drawerId = null;
+  state.drawerData = null;
+  state.inverterPanel = { loading: true, inverterId };
+  renderOverlays();
+  try {
+    const [inverter, telemetry] = await Promise.all([
+      api(`/api/inverters/${encodeURIComponent(inverterId)}`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry`),
+    ]);
+    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings };
+  } catch (error) {
+    state.inverterPanel = { loading: false, inverterId, error: error.message };
+  }
+  renderOverlays();
+}
+
+function closeInverter() {
+  state.inverterPanel = null;
+  renderOverlays();
+}
+
+function inverterChart(readings, series, ariaLabel) {
+  if (!readings?.length) return `<div class="chart-empty">No telemetry is available for this period.</div>`;
+  const sampled = readings.filter((_, index) => index % 4 === 0 || index === readings.length - 1);
+  const width = 680, height = 190, left = 42, right = 12, top = 12, bottom = 28;
+  const values = sampled.flatMap(row => series.map(item => Number(row[item.field] || 0)));
+  const maximum = Math.max(1, ...values) * 1.08;
+  const x = index => left + index * ((width - left - right) / Math.max(1, sampled.length - 1));
+  const y = value => top + (height - top - bottom) * (1 - Number(value || 0) / maximum);
+  const grid = [0, .5, 1].map(step => {
+    const yy = top + (height-top-bottom)*step;
+    return `<line class="grid-line" x1="${left}" y1="${yy}" x2="${width-right}" y2="${yy}"/><text class="axis-label" x="0" y="${yy+3}">${formatNumber(maximum*(1-step),0)}</text>`;
+  }).join("");
+  const lines = series.map(item => `<polyline fill="none" stroke="${item.color}" stroke-width="2" vector-effect="non-scaling-stroke" points="${sampled.map((row,index)=>`${x(index)},${y(row[item.field])}`).join(' ')}"/>`).join("");
+  const first = sampled[0]?.timestamp?.slice(5,10) || "";
+  const last = sampled[sampled.length-1]?.timestamp?.slice(5,10) || "";
+  return `<div class="inverter-chart-legend">${series.map(item=>`<span><i style="background:${item.color}"></i>${item.label}</span>`).join("")}</div><svg class="inverter-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(ariaLabel)}">${grid}${lines}<text class="axis-label" x="${left}" y="${height-6}">${first}</text><text class="axis-label" text-anchor="end" x="${width-right}" y="${height-6}">${last}</text></svg>`;
+}
+
+function renderInverterDrawer() {
+  const panel = state.inverterPanel;
+  if (!panel) return "";
+  if (panel.loading) return `<div class="drawer-backdrop" onclick="closeInverter()"></div><aside class="detail-drawer inverter-drawer" aria-label="Loading inverter details"><div class="drawer-body"><div class="inverter-loading"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div></div></aside>`;
+  if (panel.error) return `<div class="drawer-backdrop" onclick="closeInverter()"></div><aside class="detail-drawer inverter-drawer"><header class="drawer-header"><div class="drawer-title"><span>Inverter monitoring</span><h3>Unable to load data</h3></div><button class="icon-button" onclick="closeInverter()">${icon("close")}</button></header><div class="drawer-body"><div class="empty-state"><div><strong>Monitoring data unavailable</strong><p>${escapeHtml(panel.error)}</p><button class="button" onclick="openInverter('${escapeHtml(panel.inverterId)}')">Retry</button></div></div></div></aside>`;
+  const inverter = panel.inverter;
+  const summary = panel.summary;
+  const latest = summary.latest || {};
+  const indicators = summary.indicators || [];
+  return `<div class="drawer-backdrop" onclick="closeInverter()"></div>
+    <aside class="detail-drawer inverter-drawer" role="dialog" aria-modal="true" aria-label="Inverter monitoring details">
+      <header class="drawer-header"><div class="drawer-title"><span>${escapeHtml(inverter.block_info || 'Unassigned block')} · ${formatNumber(inverter.rated_ac_power_kw,0)} kW AC</span><h3>${escapeHtml(inverter.name)} monitoring</h3></div><button class="icon-button" onclick="closeInverter()">${icon("close")}</button></header>
+      <div class="drawer-body">
+        <div class="chip-row">${statusPill(summary.status)}<span class="tag">${escapeHtml(latest.operating_state || 'No state')}</span><span class="tag warning">Synthetic demo data</span></div>
+        <div class="synthetic-notice strong">${icon("info")} These are deterministic simulated readings, not actual sensors or a confirmed fault diagnosis.</div>
+        <div class="detail-section"><div class="detail-section-title">Latest reading · ${escapeHtml(latest.timestamp || 'unavailable')}</div><div class="detail-metrics inverter-metrics">
+          <div class="detail-metric"><span>AC output</span><strong>${formatNumber(latest.ac_power_kw,1)} kW</strong></div>
+          <div class="detail-metric"><span>DC input</span><strong>${formatNumber(latest.dc_power_kw,1)} kW</strong></div>
+          <div class="detail-metric"><span>Conversion efficiency</span><strong>${latest.conversion_efficiency_pct == null ? 'N/A' : `${formatNumber(latest.conversion_efficiency_pct,1)}%`}</strong></div>
+          <div class="detail-metric"><span>Relative yield</span><strong>${summary.relative_yield_pct == null ? 'N/A' : `${formatNumber(summary.relative_yield_pct,1)}%`}</strong></div>
+          <div class="detail-metric"><span>Inverter temperature</span><strong>${latest.inverter_temperature_c == null ? 'N/A' : `${formatNumber(latest.inverter_temperature_c,1)}°C`}</strong></div>
+          <div class="detail-metric"><span>7-day energy</span><strong>${formatNumber(summary.actual_energy_kwh/1000,1)} MWh</strong></div>
+        </div></div>
+        <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power')}</div>
+        <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power')}</div>
+        <div class="detail-section"><div class="detail-section-title">Recent abnormal performance indicators</div>${indicators.length ? `<div class="indicator-list">${indicators.map(item=>`<div class="indicator-item ${escapeHtml(item.severity)}"><strong>${escapeHtml(item.code.replaceAll('_',' '))}</strong><p>${escapeHtml(item.message)}</p></div>`).join('')}</div>` : `<div class="empty-indicators">No rule-based abnormal-performance indicators in this period.</div>`}</div>
+        <div class="detail-section"><div class="recommendation"><strong>How this is calculated</strong><p>${escapeHtml(summary.methodology)}</p></div></div>
+      </div>
+    </aside>`;
 }
 
 async function openAnomaly(id) {
@@ -934,7 +1011,7 @@ function commandResults() {
 function renderOverlays() {
   const root = document.getElementById("overlay-root");
   if (!root) return;
-  root.innerHTML = `${renderDrawer()}${renderModal()}${renderCommandPalette()}`;
+  root.innerHTML = `${renderDrawer()}${renderInverterDrawer()}${renderModal()}${renderCommandPalette()}`;
 }
 
 function renderModal() {

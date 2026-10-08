@@ -17,6 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB_PATH, connect, init_db, rows_to_dicts
+from .inverter_monitoring import (
+    conversion_efficiency_pct,
+    expected_ac_power_kw,
+    parse_iso_datetime,
+    summarize_inverter,
+)
 from .vision import analyze_thermal_image
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -75,6 +81,49 @@ def get_site_or_404(site_id: str) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="Site not found")
     return dict(row)
+
+
+def get_inverter_or_404(inverter_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM inverters WHERE inverter_id = ?", (inverter_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inverter not found")
+    return dict(row)
+
+
+def _telemetry_range(start: str | None, end: str | None) -> tuple[str | None, str | None]:
+    try:
+        start_dt = parse_iso_datetime(start)
+        end_dt = parse_iso_datetime(end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Use ISO 8601 timestamps for start and end") from exc
+    if start_dt and end_dt and start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start must be before end")
+    normalized_start = start if start and "T" in start else f"{start}T00:00:00Z" if start else None
+    normalized_end = end if end and "T" in end else f"{end}T23:59:59Z" if end else None
+    return normalized_start, normalized_end
+
+
+def _read_inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+    start, end = _telemetry_range(start, end)
+    where = ["inverter_id = ?"]
+    params: list[Any] = [inverter_id]
+    if start:
+        where.append("timestamp >= ?")
+        params.append(start)
+    if end:
+        where.append("timestamp <= ?")
+        params.append(end)
+    with connect() as conn:
+        return rows_to_dicts(conn.execute(
+            "SELECT * FROM inverter_telemetry WHERE " + " AND ".join(where) + " ORDER BY timestamp",
+            params,
+        ))
+
+
+def _inverter_summary_payload(inverter: dict[str, Any], start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    readings = _read_inverter_telemetry(inverter["inverter_id"], start, end)
+    return summarize_inverter(inverter, readings)
 
 
 def _active_filter_sql(status_column: str = "status") -> str:
@@ -201,11 +250,65 @@ def site_detail(site_id: str) -> dict[str, Any]:
         )
     site.update(summary)
     site["task_counts"] = task_counts
-    site["inverters"] = [
-        {"id": f"INV-{i:02d}", "yield": val, "status": "Watch" if val < 90 else "Healthy"}
-        for i, val in enumerate([97.2, 96.8, 94.7, 88.9, 92.4, 95.8, 36.3, 93.9, 97.1, 90.7, 95.4, 89.5], start=1)
-    ]
+    site["inverters"] = list_site_inverters(site_id)
     return site
+
+
+@app.get("/api/sites/{site_id}/inverters")
+def list_site_inverters(site_id: str, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+    get_site_or_404(site_id)
+    with connect() as conn:
+        inverters = rows_to_dicts(conn.execute(
+            "SELECT * FROM inverters WHERE site_id = ? ORDER BY name", (site_id,)
+        ))
+    result: list[dict[str, Any]] = []
+    for inverter in inverters:
+        summary = _inverter_summary_payload(inverter, start, end)
+        result.append({
+            **inverter,
+            "id": inverter["name"],
+            "yield": summary["relative_yield_pct"],
+            "status": summary["status"],
+            "latest": summary["latest"],
+            "actual_energy_kwh": summary["actual_energy_kwh"],
+            "expected_energy_kwh": summary["expected_energy_kwh"],
+            "indicator_count": len(summary["indicators"]),
+        })
+    return result
+
+
+@app.get("/api/inverters/{inverter_id}")
+def inverter_detail(inverter_id: str) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    return {**inverter, "summary": _inverter_summary_payload(inverter)}
+
+
+@app.get("/api/inverters/{inverter_id}/telemetry")
+def inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    readings = _read_inverter_telemetry(inverter_id, start, end)
+    rated = float(inverter["rated_ac_power_kw"])
+    for reading in readings:
+        reading["expected_ac_power_kw"] = expected_ac_power_kw(
+            rated, reading.get("irradiance_w_m2"), reading.get("inverter_temperature_c")
+        )
+        reading["conversion_efficiency_pct"] = conversion_efficiency_pct(
+            reading.get("dc_power_kw"), reading.get("ac_power_kw")
+        )
+    return {
+        "inverter_id": inverter_id,
+        "start": readings[0]["timestamp"] if readings else None,
+        "end": readings[-1]["timestamp"] if readings else None,
+        "count": len(readings),
+        "data_classification": "synthetic_demo",
+        "readings": readings,
+    }
+
+
+@app.get("/api/inverters/{inverter_id}/summary")
+def inverter_summary(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    return _inverter_summary_payload(inverter, start, end)
 
 
 @app.get("/api/sites/{site_id}/anomalies")

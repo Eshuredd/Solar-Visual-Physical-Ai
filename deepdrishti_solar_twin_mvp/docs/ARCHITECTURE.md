@@ -25,9 +25,10 @@ FastAPI
   ├─ Anomaly state machine
   ├─ Work-order workflow
   ├─ Image-analysis endpoint
+  ├─ Inverter monitoring and rule-based indicators
   └─ CSV export
           │
-          ├─ SQLite: sites, inspections, anomalies, tasks
+          ├─ SQLite: sites, inspections, anomalies, tasks, inverters, inverter telemetry
           └─ Local static storage: RGB/thermal evidence and uploads
 ```
 
@@ -72,6 +73,20 @@ FastAPI
 - Requested action
 - Priority and workflow status
 - Notes and timestamps
+
+### Inverter and telemetry
+
+- Site-scoped permanent inverter identity, capacity, make/model, block and operational status
+- Timestamp-unique electrical, temperature, irradiance and operating-state telemetry
+- Synthetic data provenance on both equipment and readings
+- Indexed time ranges for monitoring APIs and future anomaly consumers
+
+The Phase 1 monitoring service calculates DC/AC power, conversion efficiency,
+energy, expected power and relative yield. Its expected baseline is normalized by
+rated AC capacity, irradiance and temperature. Night, low-light, startup,
+shutdown, curtailment and missing-data samples are excluded from performance
+classification. Electrical indicators remain separate from image-derived anomaly
+records until a future evidence-linking workflow establishes a justified relation.
 
 ## Production target
 

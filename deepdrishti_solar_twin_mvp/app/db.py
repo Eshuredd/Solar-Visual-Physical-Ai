@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -103,11 +104,123 @@ def init_db(reset: bool = False) -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS inverters (
+                inverter_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                rated_ac_power_kw REAL NOT NULL CHECK(rated_ac_power_kw > 0),
+                manufacturer TEXT,
+                model TEXT,
+                operational_status TEXT NOT NULL,
+                block_info TEXT,
+                data_source TEXT NOT NULL DEFAULT 'synthetic_demo',
+                UNIQUE(site_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS inverter_telemetry (
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE CASCADE,
+                timestamp TEXT NOT NULL,
+                dc_power_kw REAL NOT NULL CHECK(dc_power_kw >= 0),
+                ac_power_kw REAL NOT NULL CHECK(ac_power_kw >= 0),
+                dc_voltage_v REAL NOT NULL CHECK(dc_voltage_v >= 0 AND dc_voltage_v <= 2000),
+                dc_current_a REAL NOT NULL CHECK(dc_current_a >= 0),
+                ac_voltage_v REAL NOT NULL CHECK(ac_voltage_v >= 0 AND ac_voltage_v <= 1500),
+                ac_current_a REAL NOT NULL CHECK(ac_current_a >= 0),
+                inverter_temperature_c REAL NOT NULL CHECK(inverter_temperature_c >= -40 AND inverter_temperature_c <= 150),
+                ambient_temperature_c REAL NOT NULL CHECK(ambient_temperature_c >= -60 AND ambient_temperature_c <= 80),
+                irradiance_w_m2 REAL CHECK(irradiance_w_m2 >= 0 AND irradiance_w_m2 <= 1500),
+                operating_state TEXT NOT NULL,
+                data_source TEXT NOT NULL,
+                PRIMARY KEY(inverter_id, timestamp)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_inverters_site ON inverters(site_id);
+            CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_timestamp ON inverter_telemetry(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_state ON inverter_telemetry(inverter_id, operating_state, timestamp);
             """
         )
         count = conn.execute("SELECT COUNT(*) AS c FROM sites").fetchone()["c"]
         if count == 0:
             seed_database(conn)
+        if conn.execute("SELECT 1 FROM sites WHERE id = 'site-001'").fetchone():
+            seed_demo_inverters(conn)
+
+
+def seed_demo_inverters(conn: sqlite3.Connection) -> None:
+    """Idempotently install deterministic synthetic SCADA-like demo records."""
+    blocks = ["B1", "B1", "B1", "B2", "B2", "B2", "C1", "C1", "C1", "C2", "C2", "C2"]
+    records = [
+        (f"site-001-INV-{number:02d}", "site-001", f"INV-{number:02d}", 6800.0,
+         "Demo Power Systems", "DD-Central-6800", "Operational", blocks[number - 1], "synthetic_demo")
+        for number in range(1, 13)
+    ]
+    conn.executemany(
+        """INSERT OR IGNORE INTO inverters
+           (inverter_id, site_id, name, rated_ac_power_kw, manufacturer, model,
+            operational_status, block_info, data_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        records,
+    )
+    existing = conn.execute(
+        "SELECT COUNT(*) AS c FROM inverter_telemetry WHERE inverter_id LIKE 'site-001-INV-%'"
+    ).fetchone()["c"]
+    if existing >= 12 * 7 * 96:
+        conn.commit()
+        return
+
+    start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    telemetry: list[tuple[Any, ...]] = []
+    for inverter_number in range(1, 13):
+        inverter_id = f"site-001-INV-{inverter_number:02d}"
+        unit_factor = 0.982 + inverter_number * 0.0022
+        for sample in range(7 * 96):
+            timestamp = start + timedelta(minutes=15 * sample)
+            hour = timestamp.hour + timestamp.minute / 60
+            daylight = 6.0 <= hour <= 18.0
+            solar_shape = max(0.0, math.sin(math.pi * (hour - 6.0) / 12.0)) if daylight else 0.0
+            cloud_factor = 0.91 + 0.055 * math.sin(sample * 0.173) + 0.025 * math.sin(sample * 0.047 + 1.4)
+            irradiance = max(0.0, min(1050.0, 980.0 * solar_shape * cloud_factor))
+            ambient = 23.0 + 11.0 * max(0.0, math.sin(math.pi * (hour - 8.0) / 14.0)) + 1.1 * math.sin(sample * 0.031)
+            inverter_temp = ambient + irradiance / 1000.0 * 31.0 + (inverter_number - 6.5) * 0.12
+            operating_state = "Night"
+            abnormal_factor = 1.0
+            if irradiance >= 100:
+                operating_state = "Running"
+                if inverter_number == 7:
+                    abnormal_factor = 0.63
+                    operating_state = "Derated"
+                elif inverter_number == 12 and sample % 41 in {0, 1, 2, 3}:
+                    abnormal_factor = 0.42
+                    operating_state = "Derated"
+            elif irradiance > 0:
+                operating_state = "Startup"
+
+            temperature_factor = max(0.78, 1.0 - max(0.0, inverter_temp - 25.0) * 0.0035)
+            expected_ac = min(6800.0, 6800.0 * irradiance / 1000.0 * temperature_factor)
+            ripple = 1.0 + 0.008 * math.sin(sample * 0.29 + inverter_number)
+            ac_power = max(0.0, min(6800.0, expected_ac * unit_factor * abnormal_factor * ripple))
+            efficiency = max(0.925, 0.978 - max(0.0, inverter_temp - 55.0) * 0.00035)
+            dc_power = ac_power / efficiency if ac_power else 0.0
+            dc_voltage = 0.0 if irradiance <= 0 else 930.0 + 85.0 * solar_shape - 0.9 * max(0.0, inverter_temp - 25.0)
+            dc_current = dc_power * 1000.0 / dc_voltage if dc_voltage else 0.0
+            ac_voltage = 0.0 if ac_power <= 0 else 690.0 + 3.0 * math.sin(sample * 0.11 + inverter_number)
+            ac_current = ac_power * 1000.0 / (math.sqrt(3) * ac_voltage * 0.99) if ac_voltage else 0.0
+            telemetry.append((
+                inverter_id, timestamp.isoformat().replace("+00:00", "Z"), round(dc_power, 3),
+                round(ac_power, 3), round(dc_voltage, 3), round(dc_current, 3),
+                round(ac_voltage, 3), round(ac_current, 3), round(inverter_temp, 3),
+                round(ambient, 3), round(irradiance, 3), operating_state, "synthetic_demo_v1",
+            ))
+    conn.executemany(
+        """INSERT OR IGNORE INTO inverter_telemetry
+           (inverter_id, timestamp, dc_power_kw, ac_power_kw, dc_voltage_v,
+            dc_current_a, ac_voltage_v, ac_current_a, inverter_temperature_c,
+            ambient_temperature_c, irradiance_w_m2, operating_state, data_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        telemetry,
+    )
+    conn.commit()
 
 
 def _history(asset_id: str, status: str, detected: str) -> str:

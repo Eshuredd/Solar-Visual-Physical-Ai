@@ -36,6 +36,9 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Responsive mobile/field-app simulation
 - CSV export
 - Resettable demo data
+- Persistent site-specific inverter registry and seven days of 15-minute demo telemetry
+- Irradiance/temperature-normalized inverter yield, efficiency and energy monitoring
+- Interactive inverter detail panel with historical and expected-versus-actual charts
 
 ### Runnable image-analysis demonstration
 
@@ -146,6 +149,10 @@ The tests cover:
 | GET | `/api/portfolio` | Portfolio KPIs and analytics |
 | GET | `/api/sites` | Site list |
 | GET | `/api/sites/{site_id}` | Site dashboard data |
+| GET | `/api/sites/{site_id}/inverters` | Site-specific inverter performance summaries |
+| GET | `/api/inverters/{inverter_id}` | Inverter metadata and current monitoring summary |
+| GET | `/api/inverters/{inverter_id}/telemetry` | Time-range telemetry with modeled expected power |
+| GET | `/api/inverters/{inverter_id}/summary` | Time-range energy, yield, efficiency and indicators |
 | GET | `/api/sites/{site_id}/anomalies` | Filterable findings |
 | GET | `/api/anomalies/{anomaly_id}` | Full anomaly/evidence/history record |
 | PATCH | `/api/anomalies/{anomaly_id}` | Status, priority or notes update |
@@ -221,3 +228,9 @@ curl -X POST http://127.0.0.1:8000/api/reset
 ## Safety and accuracy note
 
 The demo must not be used for live electrical, fire, warranty or maintenance decisions. Thermal interpretation and energy-impact estimation require validated inputs, domain review and documented accuracy thresholds.
+
+## Inverter monitoring demonstration data
+
+The bundled inverter data is deterministic synthetic data, not live SCADA. It covers 12 inverters at Sunridge Solar Park for seven days at 15-minute intervals. The simulation includes diurnal irradiance, temperature derating, unit variation, one persistently underperforming inverter and one intermittently derated inverter.
+
+Relative yield compares integrated actual AC energy with a capacity-, irradiance- and temperature-normalized expected AC baseline. Samples during night, low irradiance, startup, shutdown, curtailment or missing-data states are excluded from performance comparison. Indicators are transparent rules and must not be interpreted as confirmed fault diagnoses.
