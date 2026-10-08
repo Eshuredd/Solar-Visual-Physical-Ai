@@ -609,11 +609,14 @@ async function openInverter(inverterId) {
   state.inverterPanel = { loading: true, inverterId };
   renderOverlays();
   try {
-    const [inverter, telemetry] = await Promise.all([
+    await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze`, { method: "POST" });
+    const [inverter, telemetry, alerts] = await Promise.all([
       api(`/api/inverters/${encodeURIComponent(inverterId)}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/alerts`),
     ]);
-    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings };
+    const active = alerts.find(item => item.lifecycle_status !== "Resolved") || alerts[0];
+    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, selectedAlertId: active?.alert_id || null };
   } catch (error) {
     state.inverterPanel = { loading: false, inverterId, error: error.message };
   }
@@ -625,7 +628,7 @@ function closeInverter() {
   renderOverlays();
 }
 
-function inverterChart(readings, series, ariaLabel) {
+function inverterChart(readings, series, ariaLabel, alerts = []) {
   if (!readings?.length) return `<div class="chart-empty">No telemetry is available for this period.</div>`;
   const sampled = readings.filter((_, index) => index % 4 === 0 || index === readings.length - 1);
   const width = 680, height = 190, left = 42, right = 12, top = 12, bottom = 28;
@@ -638,9 +641,34 @@ function inverterChart(readings, series, ariaLabel) {
     return `<line class="grid-line" x1="${left}" y1="${yy}" x2="${width-right}" y2="${yy}"/><text class="axis-label" x="0" y="${yy+3}">${formatNumber(maximum*(1-step),0)}</text>`;
   }).join("");
   const lines = series.map(item => `<polyline fill="none" stroke="${item.color}" stroke-width="2" vector-effect="non-scaling-stroke" points="${sampled.map((row,index)=>`${x(index)},${y(row[item.field])}`).join(' ')}"/>`).join("");
+  const timeStart = new Date(sampled[0].timestamp).getTime();
+  const timeSpan = Math.max(1, new Date(sampled[sampled.length-1].timestamp).getTime() - timeStart);
+  const markers = alerts.map(alert => {
+    const startX = left + Math.max(0, Math.min(1, (new Date(alert.start_timestamp).getTime()-timeStart)/timeSpan)) * (width-left-right);
+    const endX = left + Math.max(0, Math.min(1, (new Date(alert.end_timestamp).getTime()-timeStart)/timeSpan)) * (width-left-right);
+    return `<rect class="alert-chart-marker ${className(alert.severity)}" x="${startX}" y="${top}" width="${Math.max(2,endX-startX)}" height="${height-top-bottom}" rx="2"/>`;
+  }).join('');
   const first = sampled[0]?.timestamp?.slice(5,10) || "";
   const last = sampled[sampled.length-1]?.timestamp?.slice(5,10) || "";
-  return `<div class="inverter-chart-legend">${series.map(item=>`<span><i style="background:${item.color}"></i>${item.label}</span>`).join("")}</div><svg class="inverter-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(ariaLabel)}">${grid}${lines}<text class="axis-label" x="${left}" y="${height-6}">${first}</text><text class="axis-label" text-anchor="end" x="${width-right}" y="${height-6}">${last}</text></svg>`;
+  return `<div class="inverter-chart-legend">${series.map(item=>`<span><i style="background:${item.color}"></i>${item.label}</span>`).join("")}${alerts.length?'<span><i class="alert-key"></i>Alert window</span>':''}</div><svg class="inverter-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(ariaLabel)}">${grid}${markers}${lines}<text class="axis-label" x="${left}" y="${height-6}">${first}</text><text class="axis-label" text-anchor="end" x="${width-right}" y="${height-6}">${last}</text></svg>`;
+}
+
+function alertLabel(value) { return String(value || '').replaceAll('_',' ').replace(/\b\w/g, char=>char.toUpperCase()); }
+
+function selectInverterAlert(alertId) {
+  if (!state.inverterPanel) return;
+  state.inverterPanel.selectedAlertId = alertId;
+  renderOverlays();
+}
+
+async function updateInverterAlert(alertId, lifecycleStatus) {
+  try {
+    const updated = await api(`/api/inverter-alerts/${alertId}`, { method: "PATCH", body: { lifecycle_status: lifecycleStatus, note: `Operator changed alert status to ${lifecycleStatus}.` } });
+    const index = state.inverterPanel.alerts.findIndex(item=>item.alert_id===alertId);
+    if (index >= 0) state.inverterPanel.alerts[index] = updated;
+    renderOverlays();
+    showToast(`Inverter alert changed to ${lifecycleStatus}`, "success");
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderInverterDrawer() {
@@ -652,11 +680,18 @@ function renderInverterDrawer() {
   const summary = panel.summary;
   const latest = summary.latest || {};
   const indicators = summary.indicators || [];
+  const alerts = panel.alerts || [];
+  const activeAlerts = alerts.filter(item=>item.lifecycle_status!=="Resolved");
+  const selectedAlert = alerts.find(item=>item.alert_id===panel.selectedAlertId) || alerts[0];
+  const evidenceReadings = selectedAlert ? panel.readings.filter(row => {
+    const time = new Date(row.timestamp).getTime();
+    return time >= new Date(selectedAlert.start_timestamp).getTime()-30*60000 && time <= new Date(selectedAlert.end_timestamp).getTime()+30*60000;
+  }) : [];
   return `<div class="drawer-backdrop" onclick="closeInverter()"></div>
     <aside class="detail-drawer inverter-drawer" role="dialog" aria-modal="true" aria-label="Inverter monitoring details">
       <header class="drawer-header"><div class="drawer-title"><span>${escapeHtml(inverter.block_info || 'Unassigned block')} · ${formatNumber(inverter.rated_ac_power_kw,0)} kW AC</span><h3>${escapeHtml(inverter.name)} monitoring</h3></div><button class="icon-button" onclick="closeInverter()">${icon("close")}</button></header>
       <div class="drawer-body">
-        <div class="chip-row">${statusPill(summary.status)}<span class="tag">${escapeHtml(latest.operating_state || 'No state')}</span><span class="tag warning">Synthetic demo data</span></div>
+        <div class="chip-row">${statusPill(summary.historical_health || summary.status)}<span class="tag">Current state: ${escapeHtml(summary.current_operating_state || latest.operating_state || 'No data')}</span><span class="tag warning">${activeAlerts.length} active alert${activeAlerts.length===1?'':'s'}</span><span class="tag warning">Synthetic demo data</span></div>
         <div class="synthetic-notice strong">${icon("info")} These are deterministic simulated readings, not actual sensors or a confirmed fault diagnosis.</div>
         <div class="detail-section"><div class="detail-section-title">Latest reading · ${escapeHtml(latest.timestamp || 'unavailable')}</div><div class="detail-metrics inverter-metrics">
           <div class="detail-metric"><span>AC output</span><strong>${formatNumber(latest.ac_power_kw,1)} kW</strong></div>
@@ -665,9 +700,12 @@ function renderInverterDrawer() {
           <div class="detail-metric"><span>Relative yield</span><strong>${summary.relative_yield_pct == null ? 'N/A' : `${formatNumber(summary.relative_yield_pct,1)}%`}</strong></div>
           <div class="detail-metric"><span>Inverter temperature</span><strong>${latest.inverter_temperature_c == null ? 'N/A' : `${formatNumber(latest.inverter_temperature_c,1)}°C`}</strong></div>
           <div class="detail-metric"><span>7-day energy</span><strong>${formatNumber(summary.actual_energy_kwh/1000,1)} MWh</strong></div>
+          <div class="detail-metric"><span>Active alerts</span><strong>${activeAlerts.length}</strong></div>
         </div></div>
-        <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power')}</div>
-        <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power')}</div>
+        <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power',alerts)}</div>
+        <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power',alerts)}</div>
+        <div class="detail-section"><div class="detail-section-title">Telemetry anomaly events</div>${alerts.length ? `<div class="inverter-alert-list">${alerts.map(alert=>`<button class="inverter-alert-card ${alert.alert_id===selectedAlert?.alert_id?'selected':''}" onclick="selectInverterAlert('${alert.alert_id}')"><i class="severity-bar ${className(alert.severity)}"></i><span><strong>${escapeHtml(alertLabel(alert.anomaly_category))}</strong><small>${escapeHtml(alert.severity)} · ${formatDate(alert.start_timestamp)} · ${alert.duration_minutes} min</small></span>${statusPill(alert.lifecycle_status)}</button>`).join('')}</div>` : `<div class="empty-indicators">No event-based alerts were detected for this period.</div>`}</div>
+        ${selectedAlert ? `<div class="detail-section alert-evidence"><div class="detail-section-title">Selected telemetry evidence window</div><div class="chip-row">${priorityPill(selectedAlert.severity)}${statusPill(selectedAlert.lifecycle_status)}<span class="tag">${selectedAlert.duration_minutes} minutes</span><span class="tag">Unconfirmed cause</span></div><p class="detail-copy alert-time">${escapeHtml(selectedAlert.start_timestamp)} → ${escapeHtml(selectedAlert.end_timestamp)}</p>${inverterChart(evidenceReadings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual AC',color:'#9dff75'},{field:'dc_power_kw',label:'DC input',color:'#5be7d4'}],'Telemetry around the selected alert')}<div class="recommendation" style="margin-top:10px"><strong>Evidence-backed explanation</strong><p>${escapeHtml(selectedAlert.explanation)}</p></div><div class="recommendation" style="margin-top:8px"><strong>Investigation recommendation</strong><p>${escapeHtml(selectedAlert.recommended_investigation)}</p></div><div class="inline-actions alert-actions">${['Acknowledged','Investigating','Resolved'].map(status=>`<button class="button small ${selectedAlert.lifecycle_status===status?'primary':''}" onclick="updateInverterAlert('${selectedAlert.alert_id}','${status}')">${status}</button>`).join('')}</div><div class="timeline alert-history">${selectedAlert.lifecycle_history.map(item=>`<div class="timeline-item"><strong>${escapeHtml(item.status)}</strong><p>${escapeHtml(item.note)} · ${escapeHtml(item.actor)}</p><time>${formatDate(item.at)}</time></div>`).join('')}</div></div>`:''}
         <div class="detail-section"><div class="detail-section-title">Recent abnormal performance indicators</div>${indicators.length ? `<div class="indicator-list">${indicators.map(item=>`<div class="indicator-item ${escapeHtml(item.severity)}"><strong>${escapeHtml(item.code.replaceAll('_',' '))}</strong><p>${escapeHtml(item.message)}</p></div>`).join('')}</div>` : `<div class="empty-indicators">No rule-based abnormal-performance indicators in this period.</div>`}</div>
         <div class="detail-section"><div class="recommendation"><strong>How this is calculated</strong><p>${escapeHtml(summary.methodology)}</p></div></div>
       </div>

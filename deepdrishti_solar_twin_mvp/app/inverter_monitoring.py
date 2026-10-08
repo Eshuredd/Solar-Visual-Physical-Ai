@@ -167,6 +167,8 @@ def summarize_inverter(
         "relative_yield_pct": relative_yield,
         "average_conversion_efficiency_pct": round(sum(efficiencies) / len(efficiencies), 2) if efficiencies else None,
         "status": classify_status(relative_yield, latest, thresholds),
+        "historical_health": classify_status(relative_yield, latest, thresholds),
+        "current_operating_state": latest.get("operating_state") if latest else "No Data",
         "indicators": indicators,
         "methodology": "Expected AC power = rated AC capacity x irradiance/1000 x temperature factor; low-light, night, startup, shutdown, curtailment and missing samples are excluded from performance comparison.",
         "data_classification": "synthetic_demo",
@@ -178,3 +180,15 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
         return None
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def canonical_utc_timestamp(value: str | None, *, end_of_day: bool = False) -> str | None:
+    """Normalize ISO input, including offsets, to lexically sortable UTC text."""
+    if not value:
+        return None
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    if "T" not in value:
+        parsed = parsed.replace(hour=23, minute=59, second=59) if end_of_day else parsed.replace(hour=0, minute=0, second=0)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -135,9 +135,47 @@ def init_db(reset: bool = False) -> None:
                 PRIMARY KEY(inverter_id, timestamp)
             );
 
+            CREATE TABLE IF NOT EXISTS inverter_alerts (
+                alert_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE CASCADE,
+                anomaly_category TEXT NOT NULL,
+                anomaly_subtype TEXT,
+                start_timestamp TEXT NOT NULL,
+                end_timestamp TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                detection_method TEXT NOT NULL,
+                detection_score REAL NOT NULL,
+                expected_measurements TEXT NOT NULL,
+                observed_measurements TEXT NOT NULL,
+                contributing_telemetry_refs TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                recommended_investigation TEXT NOT NULL,
+                lifecycle_status TEXT NOT NULL DEFAULT 'Open',
+                lifecycle_history TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_provenance TEXT NOT NULL,
+                UNIQUE(inverter_id, anomaly_category, start_timestamp, detection_method)
+            );
+
+            CREATE TABLE IF NOT EXISTS inverter_scenarios (
+                scenario_id TEXT PRIMARY KEY,
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE CASCADE,
+                scenario_type TEXT NOT NULL,
+                start_timestamp TEXT NOT NULL,
+                end_timestamp TEXT NOT NULL,
+                expected_alert_category TEXT,
+                description TEXT NOT NULL,
+                provenance TEXT NOT NULL DEFAULT 'synthetic_ground_truth'
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inverters_site ON inverters(site_id);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_timestamp ON inverter_telemetry(timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_state ON inverter_telemetry(inverter_id, operating_state, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_inverter_alerts_site ON inverter_alerts(site_id, start_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_inverter_alerts_inverter ON inverter_alerts(inverter_id, lifecycle_status, start_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_inverter_alerts_category ON inverter_alerts(anomaly_category, severity, lifecycle_status);
             """
         )
         count = conn.execute("SELECT COUNT(*) AS c FROM sites").fetchone()["c"]
@@ -145,6 +183,7 @@ def init_db(reset: bool = False) -> None:
             seed_database(conn)
         if conn.execute("SELECT 1 FROM sites WHERE id = 'site-001'").fetchone():
             seed_demo_inverters(conn)
+            seed_phase2_scenarios(conn)
 
 
 def seed_demo_inverters(conn: sqlite3.Connection) -> None:
@@ -219,6 +258,70 @@ def seed_demo_inverters(conn: sqlite3.Connection) -> None:
             ambient_temperature_c, irradiance_w_m2, operating_state, data_source)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         telemetry,
+    )
+    conn.commit()
+
+
+def seed_phase2_scenarios(conn: sqlite3.Connection) -> None:
+    """Inject repeatable scenario windows; labels remain in a separate truth table."""
+    scenarios = [
+        ("scenario-normal", "site-001-INV-01", "normal_operation", "2026-08-06T00:00:00Z", "2026-08-12T23:45:00Z", None, "Normal reference operation."),
+        ("scenario-pv", "site-001-INV-02", "pv_side_underperformance", "2026-08-07T09:00:00Z", "2026-08-07T13:00:00Z", "pv_side_underperformance", "Sustained DC-side reduction with consistent conversion."),
+        ("scenario-ac", "site-001-INV-03", "ac_conversion_underperformance", "2026-08-08T10:00:00Z", "2026-08-08T14:00:00Z", "ac_conversion_underperformance", "DC input remains available while AC conversion falls."),
+        ("scenario-hot", "site-001-INV-04", "inverter_overheating", "2026-08-09T10:00:00Z", "2026-08-09T15:00:00Z", "inverter_overheating", "Load-adjusted inverter temperature elevation."),
+        ("scenario-shutdown", "site-001-INV-05", "temporary_shutdown", "2026-08-10T11:00:00Z", "2026-08-10T12:30:00Z", "unexpected_shutdown", "Unexplained daytime zero-output interval followed by recovery."),
+        ("scenario-curtail", "site-001-INV-06", "grid_curtailment", "2026-08-07T12:00:00Z", "2026-08-07T14:00:00Z", None, "Known grid curtailment exclusion window."),
+        ("scenario-persistent", "site-001-INV-07", "persistent_pv_underperformance", "2026-08-06T07:00:00Z", "2026-08-12T17:00:00Z", "pv_side_underperformance", "Persistent PV-side reduction; root cause intentionally unconfirmed."),
+        ("scenario-missing", "site-001-INV-08", "missing_telemetry", "2026-08-08T10:00:00Z", "2026-08-08T12:00:00Z", "data_quality", "Missing timestamp interval."),
+        ("scenario-invalid", "site-001-INV-09", "invalid_measurement", "2026-08-09T12:00:00Z", "2026-08-09T12:00:00Z", "data_quality", "Physically inconsistent AC/DC measurement."),
+        ("scenario-stale", "site-001-INV-10", "stale_telemetry", "2026-08-12T20:00:00Z", "2026-08-12T23:45:00Z", "data_quality", "Telemetry stream stops before analysis end."),
+        ("scenario-recovery", "site-001-INV-11", "recovery_after_underperformance", "2026-08-06T09:00:00Z", "2026-08-06T11:00:00Z", "pv_side_underperformance", "Bounded PV-side reduction with later signal recovery."),
+        ("scenario-intermittent", "site-001-INV-12", "intermittent_derating", "2026-08-06T07:00:00Z", "2026-08-12T17:00:00Z", "intermittent_derating", "Recurring short derating episodes."),
+    ]
+    conn.executemany(
+        """INSERT OR IGNORE INTO inverter_scenarios
+           (scenario_id, inverter_id, scenario_type, start_timestamp, end_timestamp,
+            expected_alert_category, description) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        scenarios,
+    )
+    # Only untouched v1 records are transformed, keeping this migration idempotent.
+    def scale(inverter: str, start: str, end: str, dc: float = 1.0, ac: float = 1.0, state: str | None = None) -> None:
+        conn.execute(
+            """UPDATE inverter_telemetry SET
+                   dc_power_kw = dc_power_kw * ?, dc_current_a = dc_current_a * ?,
+                   ac_power_kw = ac_power_kw * ?, ac_current_a = ac_current_a * ?,
+                   operating_state = COALESCE(?, operating_state), data_source = 'synthetic_demo_v2'
+               WHERE inverter_id = ? AND timestamp BETWEEN ? AND ? AND data_source = 'synthetic_demo_v1'""",
+            (dc, dc, ac, ac, state, inverter, start, end),
+        )
+    scale("site-001-INV-02", "2026-08-07T09:00:00Z", "2026-08-07T13:00:00Z", .62, .62)
+    scale("site-001-INV-03", "2026-08-08T10:00:00Z", "2026-08-08T14:00:00Z", 1.0, .70)
+    conn.execute(
+        """UPDATE inverter_telemetry SET inverter_temperature_c = inverter_temperature_c + 25,
+                  data_source = 'synthetic_demo_v2'
+           WHERE inverter_id = 'site-001-INV-04' AND timestamp BETWEEN '2026-08-09T10:00:00Z' AND '2026-08-09T15:00:00Z'
+             AND data_source = 'synthetic_demo_v1'"""
+    )
+    conn.execute(
+        """UPDATE inverter_telemetry SET dc_power_kw=0, ac_power_kw=0, dc_current_a=0,
+                  ac_current_a=0, operating_state='Running', data_source='synthetic_demo_v2'
+           WHERE inverter_id='site-001-INV-05' AND timestamp BETWEEN '2026-08-10T11:00:00Z' AND '2026-08-10T12:30:00Z'
+             AND data_source='synthetic_demo_v1'"""
+    )
+    scale("site-001-INV-06", "2026-08-07T12:00:00Z", "2026-08-07T14:00:00Z", .50, .50, "Curtailment")
+    scale("site-001-INV-11", "2026-08-06T09:00:00Z", "2026-08-06T11:00:00Z", .64, .64)
+    conn.execute(
+        "DELETE FROM inverter_telemetry WHERE inverter_id='site-001-INV-08' AND timestamp BETWEEN '2026-08-08T10:00:00Z' AND '2026-08-08T12:00:00Z'"
+    )
+    conn.execute(
+        """UPDATE inverter_telemetry SET ac_power_kw=dc_power_kw*1.08,
+                  ac_current_a=(dc_power_kw*1.08*1000)/(1.7320508075688772*ac_voltage_v*.99),
+                  data_source='synthetic_demo_v2'
+           WHERE inverter_id='site-001-INV-09' AND timestamp='2026-08-09T12:00:00Z'
+             AND data_source='synthetic_demo_v1'"""
+    )
+    conn.execute(
+        "DELETE FROM inverter_telemetry WHERE inverter_id='site-001-INV-10' AND timestamp > '2026-08-12T20:00:00Z'"
     )
     conn.commit()
 

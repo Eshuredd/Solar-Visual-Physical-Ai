@@ -17,7 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB_PATH, connect, init_db, rows_to_dicts
+from .inverter_anomaly import CATEGORIES, METHOD_VERSION, detect_anomaly_events, evaluate_synthetic_events
 from .inverter_monitoring import (
+    canonical_utc_timestamp,
     conversion_efficiency_pct,
     expected_ac_power_kw,
     parse_iso_datetime,
@@ -75,6 +77,12 @@ class TaskPatch(BaseModel):
     notes: str | None = Field(default=None, max_length=3000)
 
 
+class InverterAlertPatch(BaseModel):
+    lifecycle_status: Literal["Open", "Acknowledged", "Investigating", "Resolved"]
+    note: str = Field(default="", max_length=2000)
+    actor: str = Field(default="DeepDrishti operator", min_length=2, max_length=120)
+
+
 def get_site_or_404(site_id: str) -> dict[str, Any]:
     with connect() as conn:
         row = conn.execute("SELECT * FROM sites WHERE id = ?", (site_id,)).fetchone()
@@ -99,8 +107,8 @@ def _telemetry_range(start: str | None, end: str | None) -> tuple[str | None, st
         raise HTTPException(status_code=400, detail="Use ISO 8601 timestamps for start and end") from exc
     if start_dt and end_dt and start_dt > end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
-    normalized_start = start if start and "T" in start else f"{start}T00:00:00Z" if start else None
-    normalized_end = end if end and "T" in end else f"{end}T23:59:59Z" if end else None
+    normalized_start = canonical_utc_timestamp(start)
+    normalized_end = canonical_utc_timestamp(end, end_of_day=True)
     return normalized_start, normalized_end
 
 
@@ -309,6 +317,163 @@ def inverter_telemetry(inverter_id: str, start: str | None = None, end: str | No
 def inverter_summary(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     inverter = get_inverter_or_404(inverter_id)
     return _inverter_summary_payload(inverter, start, end)
+
+
+def _decode_alert(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    for field in ("expected_measurements", "observed_measurements", "contributing_telemetry_refs", "lifecycle_history"):
+        item[field] = json.loads(item[field])
+    start = parse_iso_datetime(item["start_timestamp"])
+    end = parse_iso_datetime(item["end_timestamp"])
+    item["duration_minutes"] = int((end - start).total_seconds() / 60) + 15 if start and end else None
+    item["evidence_type"] = "telemetry"
+    item["diagnosis_status"] = "unconfirmed"
+    return item
+
+
+def _alert_query(where: list[str], params: list[Any], severity: str | None, status: str | None, anomaly_type: str | None, start: str | None, end: str | None) -> list[dict[str, Any]]:
+    if severity and severity not in {"Critical", "High", "Medium", "Low"}:
+        raise HTTPException(status_code=400, detail="Unknown alert severity")
+    if status and status not in {"Open", "Acknowledged", "Investigating", "Resolved"}:
+        raise HTTPException(status_code=400, detail="Unknown alert lifecycle status")
+    if severity:
+        where.append("severity = ?")
+        params.append(severity)
+    if status:
+        where.append("lifecycle_status = ?")
+        params.append(status)
+    if anomaly_type:
+        if anomaly_type not in CATEGORIES:
+            raise HTTPException(status_code=400, detail="Unknown inverter anomaly type")
+        where.append("anomaly_category = ?")
+        params.append(anomaly_type)
+    normalized_start, normalized_end = _telemetry_range(start, end)
+    if normalized_start:
+        where.append("end_timestamp >= ?")
+        params.append(normalized_start)
+    if normalized_end:
+        where.append("start_timestamp <= ?")
+        params.append(normalized_end)
+    with connect() as conn:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT * FROM inverter_alerts WHERE " + " AND ".join(where) +
+            " ORDER BY CASE severity WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 ELSE 3 END, start_timestamp DESC",
+            params,
+        ))
+    return [_decode_alert(row) for row in rows]
+
+
+@app.get("/api/sites/{site_id}/inverter-alerts")
+def site_inverter_alerts(site_id: str, severity: str | None = None, status: str | None = None, anomaly_type: str | None = None, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+    get_site_or_404(site_id)
+    return _alert_query(["site_id = ?"], [site_id], severity, status, anomaly_type, start, end)
+
+
+@app.get("/api/inverters/{inverter_id}/alerts")
+def inverter_alerts(inverter_id: str, severity: str | None = None, status: str | None = None, anomaly_type: str | None = None, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+    get_inverter_or_404(inverter_id)
+    return _alert_query(["inverter_id = ?"], [inverter_id], severity, status, anomaly_type, start, end)
+
+
+@app.post("/api/inverters/{inverter_id}/analyze")
+def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    normalized_start, normalized_end = _telemetry_range(start, end)
+    readings = _read_inverter_telemetry(inverter_id, normalized_start, normalized_end)
+    with connect() as conn:
+        site_end_row = conn.execute(
+            "SELECT MAX(t.timestamp) AS end_at FROM inverter_telemetry t JOIN inverters i ON i.inverter_id=t.inverter_id WHERE i.site_id = ?",
+            (inverter["site_id"],),
+        ).fetchone()
+    analysis_end = normalized_end or (site_end_row["end_at"] if site_end_row else None)
+    events = detect_anomaly_events(inverter, readings, analysis_end=analysis_end)
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    alert_ids: list[str] = []
+    with connect() as conn:
+        for event in events:
+            identity = f"{inverter_id}|{event['anomaly_category']}|{event['start_timestamp']}|{METHOD_VERSION}"
+            alert_id = f"inv-alert-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex[:12]}"
+            existing = conn.execute("SELECT * FROM inverter_alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE inverter_alerts SET end_timestamp=?, severity=?, detection_score=?,
+                       expected_measurements=?, observed_measurements=?, contributing_telemetry_refs=?,
+                       explanation=?, recommended_investigation=?, updated_at=? WHERE alert_id=?""",
+                    (event["end_timestamp"], event["severity"], event["detection_score"],
+                     json.dumps(event["expected_measurements"]), json.dumps(event["observed_measurements"]),
+                     json.dumps(event["contributing_telemetry_refs"]), event["explanation"],
+                     event["recommended_investigation"], now, alert_id),
+                )
+            else:
+                history = [{"at": now, "status": "Open", "actor": "Inverter Detection Engine", "note": "Evidence-backed telemetry event created for operator investigation."}]
+                conn.execute(
+                    """INSERT INTO inverter_alerts
+                       (alert_id, site_id, inverter_id, anomaly_category, anomaly_subtype,
+                        start_timestamp, end_timestamp, severity, detection_method, detection_score,
+                        expected_measurements, observed_measurements, contributing_telemetry_refs,
+                        explanation, recommended_investigation, lifecycle_status, lifecycle_history,
+                        created_at, updated_at, data_provenance)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?)""",
+                    (alert_id, inverter["site_id"], inverter_id, event["anomaly_category"], event.get("anomaly_subtype"),
+                     event["start_timestamp"], event["end_timestamp"], event["severity"], event["detection_method"],
+                     event["detection_score"], json.dumps(event["expected_measurements"]),
+                     json.dumps(event["observed_measurements"]), json.dumps(event["contributing_telemetry_refs"]),
+                     event["explanation"], event["recommended_investigation"], json.dumps(history), now, now,
+                     inverter["data_source"]),
+                )
+            alert_ids.append(alert_id)
+        conn.commit()
+    return {
+        "inverter_id": inverter_id, "analysis_start": normalized_start or (readings[0]["timestamp"] if readings else None),
+        "analysis_end": analysis_end, "events_detected": len(events), "alert_ids": alert_ids,
+        "method": METHOD_VERSION, "idempotent": True,
+        "message": "Rule-based investigation alerts only; no root cause has been verified.",
+    }
+
+
+@app.get("/api/inverter-alerts/evaluation")
+def inverter_alert_evaluation(site_id: str = "site-001") -> dict[str, Any]:
+    get_site_or_404(site_id)
+    with connect() as conn:
+        inverters = rows_to_dicts(conn.execute("SELECT * FROM inverters WHERE site_id=? ORDER BY inverter_id", (site_id,)))
+        scenarios = rows_to_dicts(conn.execute(
+            """SELECT s.* FROM inverter_scenarios s JOIN inverters i ON i.inverter_id=s.inverter_id
+               WHERE i.site_id=? ORDER BY s.scenario_id""", (site_id,)
+        ))
+        site_end = conn.execute(
+            "SELECT MAX(t.timestamp) FROM inverter_telemetry t JOIN inverters i ON i.inverter_id=t.inverter_id WHERE i.site_id=?", (site_id,)
+        ).fetchone()[0]
+    detected: list[dict[str, Any]] = []
+    for inverter in inverters:
+        for event in detect_anomaly_events(inverter, _read_inverter_telemetry(inverter["inverter_id"]), analysis_end=site_end):
+            detected.append({**event, "inverter_id": inverter["inverter_id"]})
+    return evaluate_synthetic_events(detected, scenarios)
+
+
+@app.get("/api/inverter-alerts/{alert_id}")
+def inverter_alert_detail(alert_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM inverter_alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inverter alert not found")
+    return _decode_alert(dict(row))
+
+
+@app.patch("/api/inverter-alerts/{alert_id}")
+def update_inverter_alert(alert_id: str, patch: InverterAlertPatch) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM inverter_alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Inverter alert not found")
+        history = json.loads(row["lifecycle_history"])
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        history.append({"at": now, "status": patch.lifecycle_status, "actor": patch.actor, "note": patch.note or f"Status changed from {row['lifecycle_status']}."})
+        conn.execute(
+            "UPDATE inverter_alerts SET lifecycle_status=?, lifecycle_history=?, updated_at=? WHERE alert_id=?",
+            (patch.lifecycle_status, json.dumps(history), now, alert_id),
+        )
+        conn.commit()
+    return inverter_alert_detail(alert_id)
 
 
 @app.get("/api/sites/{site_id}/anomalies")

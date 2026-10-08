@@ -109,7 +109,7 @@ def test_synthetic_telemetry_generation_and_persistence() -> None:
     init_db(reset=True)
     with connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM inverters WHERE site_id = 'site-001'").fetchone()[0] == 12
-        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96
+        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96 - 24
         row = dict(conn.execute(
             "SELECT * FROM inverter_telemetry WHERE inverter_id = 'site-001-INV-01' AND irradiance_w_m2 > 500 LIMIT 1"
         ).fetchone())
@@ -216,7 +216,7 @@ def test_site_isolation_and_idempotent_initialization_without_data_loss() -> Non
         assert client.get("/api/sites/site-001/inverters").json()[0]["site_id"] == "site-001"
     with connect() as conn:
         assert conn.execute("SELECT owner FROM sites WHERE id = 'site-test'").fetchone()[0] == "Test Owner"
-        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96
+        assert conn.execute("SELECT COUNT(*) FROM inverter_telemetry").fetchone()[0] == 12 * 7 * 96 - 24
 
 
 def test_existing_application_views_and_site_apis_still_respond() -> None:
@@ -229,3 +229,122 @@ def test_existing_application_views_and_site_apis_still_respond() -> None:
         ]:
             response = client.get(path)
             assert response.status_code == 200, path
+
+
+def test_utc_range_normalization_and_zero_is_not_missing() -> None:
+    with make_client() as client:
+        utc = client.get(
+            "/api/inverters/site-001-INV-01/telemetry?start=2026-08-07T09:00:00Z&end=2026-08-07T13:00:00Z"
+        ).json()
+        offset = client.get(
+            "/api/inverters/site-001-INV-01/telemetry?start=2026-08-07T14:30:00%2B05:30&end=2026-08-07T18:30:00%2B05:30"
+        ).json()
+        assert utc["count"] == offset["count"] == 17
+        assert utc["readings"][0]["timestamp"] == offset["readings"][0]["timestamp"]
+        night = client.get(
+            "/api/inverters/site-001-INV-01/telemetry?start=2026-08-07T00:00:00Z&end=2026-08-07T01:00:00Z"
+        ).json()["readings"]
+        assert len(night) == 5
+        assert all(row["ac_power_kw"] == 0 and row["operating_state"] == "Night" for row in night)
+
+
+@pytest.mark.parametrize(
+    ("number", "category"),
+    [
+        (2, "pv_side_underperformance"),
+        (3, "ac_conversion_underperformance"),
+        (4, "inverter_overheating"),
+        (5, "unexpected_shutdown"),
+        (7, "pv_side_underperformance"),
+        (11, "pv_side_underperformance"),
+        (12, "intermittent_derating"),
+    ],
+)
+def test_each_equipment_anomaly_type(number: int, category: str) -> None:
+    with make_client() as client:
+        inverter_id = f"site-001-INV-{number:02d}"
+        result = client.post(f"/api/inverters/{inverter_id}/analyze")
+        assert result.status_code == 200
+        alerts = client.get(f"/api/inverters/{inverter_id}/alerts").json()
+        assert category in {item["anomaly_category"] for item in alerts}
+        assert all(item["diagnosis_status"] == "unconfirmed" for item in alerts)
+
+
+def test_normal_night_startup_and_curtailment_do_not_raise_equipment_alerts() -> None:
+    with make_client() as client:
+        for number in (1, 6):
+            inverter_id = f"site-001-INV-{number:02d}"
+            client.post(f"/api/inverters/{inverter_id}/analyze")
+            alerts = client.get(f"/api/inverters/{inverter_id}/alerts").json()
+            assert not [item for item in alerts if item["anomaly_category"] != "data_quality"]
+        # A night-only analysis has genuine zero readings but no alert.
+        night = client.post(
+            "/api/inverters/site-001-INV-01/analyze?start=2026-08-07T00:00:00Z&end=2026-08-07T05:00:00Z"
+        ).json()
+        assert night["events_detected"] == 0
+
+
+def test_missing_invalid_and_stale_data_are_separate_quality_alerts() -> None:
+    with make_client() as client:
+        expected = {8: "missing_timestamps", 9: "invalid_measurement", 10: "stale_telemetry"}
+        for number, subtype in expected.items():
+            inverter_id = f"site-001-INV-{number:02d}"
+            client.post(f"/api/inverters/{inverter_id}/analyze")
+            alerts = client.get(f"/api/inverters/{inverter_id}/alerts").json()
+            quality = [item for item in alerts if item["anomaly_category"] == "data_quality"]
+            assert subtype in {item["anomaly_subtype"] for item in quality}
+            assert not [item for item in alerts if item["anomaly_category"] != "data_quality"]
+
+
+def test_event_boundaries_deduplication_and_filters() -> None:
+    with make_client() as client:
+        inverter_id = "site-001-INV-03"
+        first = client.post(f"/api/inverters/{inverter_id}/analyze").json()
+        second = client.post(f"/api/inverters/{inverter_id}/analyze").json()
+        assert first["alert_ids"] == second["alert_ids"]
+        alerts = client.get(f"/api/inverters/{inverter_id}/alerts").json()
+        assert len(alerts) == 1
+        assert alerts[0]["start_timestamp"] == "2026-08-08T10:00:00Z"
+        assert alerts[0]["end_timestamp"] == "2026-08-08T14:00:00Z"
+        filtered = client.get(
+            "/api/sites/site-001/inverter-alerts?severity=Critical&anomaly_type=ac_conversion_underperformance&start=2026-08-08&end=2026-08-08"
+        )
+        assert filtered.status_code == 200
+        assert len(filtered.json()) == 1
+        with connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM inverter_alerts WHERE inverter_id=?", (inverter_id,)).fetchone()[0] == 1
+
+
+def test_alert_lifecycle_history_recovery_and_rerun_do_not_auto_resolve() -> None:
+    with make_client() as client:
+        inverter_id = "site-001-INV-11"
+        result = client.post(f"/api/inverters/{inverter_id}/analyze").json()
+        alert_id = result["alert_ids"][0]
+        investigated = client.patch(
+            f"/api/inverter-alerts/{alert_id}",
+            json={"lifecycle_status": "Investigating", "note": "Reviewing recovered synthetic event.", "actor": "Test operator"},
+        )
+        assert investigated.status_code == 200
+        assert investigated.json()["lifecycle_status"] == "Investigating"
+        assert len(investigated.json()["lifecycle_history"]) == 2
+        init_db()
+        assert client.get(f"/api/inverter-alerts/{alert_id}").json()["lifecycle_status"] == "Investigating"
+        client.post(f"/api/inverters/{inverter_id}/analyze")
+        assert client.get(f"/api/inverter-alerts/{alert_id}").json()["lifecycle_status"] == "Investigating"
+        resolved = client.patch(f"/api/inverter-alerts/{alert_id}", json={"lifecycle_status": "Resolved"})
+        assert resolved.json()["lifecycle_status"] == "Resolved"
+        client.post(f"/api/inverters/{inverter_id}/analyze")
+        assert client.get(f"/api/inverter-alerts/{alert_id}").json()["lifecycle_status"] == "Resolved"
+
+
+def test_synthetic_event_evaluation_is_reproducible_and_explicitly_limited() -> None:
+    with make_client() as client:
+        first = client.get("/api/inverter-alerts/evaluation").json()
+        second = client.get("/api/inverter-alerts/evaluation").json()
+        assert first == second
+        assert first["event_level_precision"] == 1.0
+        assert first["event_level_recall"] == 1.0
+        assert first["false_positive_rate"] == 0.0
+        assert first["duplicate_alert_count"] == 0
+        assert first["normal_operation_passed"] is True
+        assert "synthetic" in first["limitations"].lower()

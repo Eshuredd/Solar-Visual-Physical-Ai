@@ -39,6 +39,8 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Persistent site-specific inverter registry and seven days of 15-minute demo telemetry
 - Irradiance/temperature-normalized inverter yield, efficiency and energy monitoring
 - Interactive inverter detail panel with historical and expected-versus-actual charts
+- Explainable event-based inverter alerts with evidence windows and auditable lifecycle history
+- Reproducible synthetic scenario evaluation, clearly separated from real-world accuracy claims
 
 ### Runnable image-analysis demonstration
 
@@ -153,6 +155,12 @@ The tests cover:
 | GET | `/api/inverters/{inverter_id}` | Inverter metadata and current monitoring summary |
 | GET | `/api/inverters/{inverter_id}/telemetry` | Time-range telemetry with modeled expected power |
 | GET | `/api/inverters/{inverter_id}/summary` | Time-range energy, yield, efficiency and indicators |
+| POST | `/api/inverters/{inverter_id}/analyze` | Run idempotent event detection over a time range |
+| GET | `/api/inverters/{inverter_id}/alerts` | Filterable inverter alert history |
+| GET | `/api/sites/{site_id}/inverter-alerts` | Filterable site inverter alerts |
+| GET | `/api/inverter-alerts/{alert_id}` | Alert evidence and lifecycle history |
+| PATCH | `/api/inverter-alerts/{alert_id}` | Acknowledge, investigate or resolve an alert |
+| GET | `/api/inverter-alerts/evaluation` | Reproducible synthetic-only evaluation |
 | GET | `/api/sites/{site_id}/anomalies` | Filterable findings |
 | GET | `/api/anomalies/{anomaly_id}` | Full anomaly/evidence/history record |
 | PATCH | `/api/anomalies/{anomaly_id}` | Status, priority or notes update |
@@ -234,3 +242,19 @@ The demo must not be used for live electrical, fire, warranty or maintenance dec
 The bundled inverter data is deterministic synthetic data, not live SCADA. It covers 12 inverters at Sunridge Solar Park for seven days at 15-minute intervals. The simulation includes diurnal irradiance, temperature derating, unit variation, one persistently underperforming inverter and one intermittently derated inverter.
 
 Relative yield compares integrated actual AC energy with a capacity-, irradiance- and temperature-normalized expected AC baseline. Samples during night, low irradiance, startup, shutdown, curtailment or missing-data states are excluded from performance comparison. Indicators are transparent rules and must not be interpreted as confirmed fault diagnoses.
+
+## Phase 2A event detection
+
+The rule engine detects sustained AC-conversion underperformance from DC input,
+PV-side underperformance from an independent irradiance baseline, load-adjusted
+overheating, unexplained daytime shutdown, recurring intermittent derating and
+separate data-quality events. It does not consume the simulator's ground-truth
+labels. Grid curtailment, startup, known shutdown/protection, night and low-light
+samples are excluded from equipment alerts.
+
+Open the site dashboard and select an inverter. The drawer runs an idempotent
+analysis, shows alert markers on the charts and exposes the exact telemetry
+window, explanation, investigation recommendation and lifecycle history.
+
+See [the Phase 2A evaluation report](docs/PHASE2A_EVALUATION.md). Its metrics are
+from deterministic synthetic fixtures only and are not real-world accuracy claims.

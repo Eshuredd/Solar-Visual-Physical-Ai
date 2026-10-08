@@ -26,9 +26,10 @@ FastAPI
   ├─ Work-order workflow
   ├─ Image-analysis endpoint
   ├─ Inverter monitoring and rule-based indicators
+  ├─ Event-based inverter anomaly detection and lifecycle APIs
   └─ CSV export
           │
-          ├─ SQLite: sites, inspections, anomalies, tasks, inverters, inverter telemetry
+          ├─ SQLite: sites, inspections, anomalies, tasks, inverters, telemetry, inverter alerts
           └─ Local static storage: RGB/thermal evidence and uploads
 ```
 
@@ -87,6 +88,23 @@ rated AC capacity, irradiance and temperature. Night, low-light, startup,
 shutdown, curtailment and missing-data samples are excluded from performance
 classification. Electrical indicators remain separate from image-derived anomaly
 records until a future evidence-linking workflow establishes a justified relation.
+
+### Inverter alert
+
+- Separate from image-inspection anomalies
+- Stable event identity from inverter, category, start time and detector version
+- Start/end timestamps and contributing telemetry references
+- Expected and observed measurement evidence
+- Severity and transparent detection deviation—not a fake confidence score
+- Operator-controlled Open → Acknowledged → Investigating → Resolved lifecycle
+- Append-only lifecycle history and synthetic/real provenance
+
+Phase 2A rules compare AC against a DC-input conversion model, DC production
+against an independent irradiance/temperature baseline, and temperature against
+ambient plus operating load. Persistence windows turn individual samples into
+events. Known non-fault states are excluded, and missing, stale or invalid data
+is emitted only as `data_quality`. A recovered signal updates the event end but
+does not automatically claim that a physical repair occurred.
 
 ## Production target
 
