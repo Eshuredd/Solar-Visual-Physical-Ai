@@ -43,6 +43,7 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Reproducible synthetic scenario evaluation, clearly separated from real-world accuracy claims
 - Causal alert timestamps, recovery-aware grouping and active-versus-wall-clock duration
 - Independent seeded hold-out evaluation and complete telemetry-outage handling
+- Experimental leakage-controlled statistical and Isolation Forest review candidates, kept separate from operational alerts
 
 ### Runnable image-analysis demonstration
 
@@ -71,6 +72,7 @@ The included image engine is intentionally lightweight and transparent. It is a 
 - **Frontend:** Vanilla JavaScript, HTML and CSS; no frontend build step
 - **Digital Twin map:** self-contained SVG; no map token or external service required
 - **Tests:** Pytest + FastAPI TestClient
+- **Experimental anomaly ML:** scikit-learn Isolation Forest plus a median/MAD baseline
 - **Deployment:** local Python or Docker
 
 ## Fastest way to run
@@ -130,6 +132,17 @@ The tests cover:
 - Actual sample-image analysis and mapped finding creation
 - CSV export
 - Frontend delivery
+- Causal feature construction, partition isolation, reproducibility, artifact validation and read-only ML API behavior
+
+## Phase 2B experimental anomaly ML
+
+Train and evaluate the optional local artifact explicitly:
+
+```bash
+python3 -m app.train_inverter_ml
+```
+
+The API never trains a model. It loads the trusted local artifact when present and otherwise returns a clear ML-disabled response. The inverter drawer labels novelty scores and candidate windows as experimental review aids; they do not create, update or resolve operational alerts. See [docs/PHASE2B_ML_EVALUATION.md](docs/PHASE2B_ML_EVALUATION.md) for the leakage audit, frozen partitions and measured comparison. The final result favors the existing deterministic rules over ML for operational use.
 
 ## Recommended demo sequence for your boss
 
@@ -163,6 +176,10 @@ The tests cover:
 | GET | `/api/inverter-alerts/{alert_id}` | Alert evidence and lifecycle history |
 | PATCH | `/api/inverter-alerts/{alert_id}` | Acknowledge, investigate or resolve an alert |
 | GET | `/api/inverter-alerts/evaluation` | Reproducible synthetic-only evaluation |
+| GET | `/api/ml/model` | Experimental artifact provenance and enabled state |
+| GET | `/api/ml/evaluation` | Frozen offline comparison report |
+| GET | `/api/inverters/{inverter_id}/ml-scores` | Read-only experimental novelty scores and candidates |
+| GET | `/api/inverters/{inverter_id}/ml-comparison` | Rule/statistical/ML candidate comparison |
 | GET | `/api/sites/{site_id}/anomalies` | Filterable findings |
 | GET | `/api/anomalies/{anomaly_id}` | Full anomaly/evidence/history record |
 | PATCH | `/api/anomalies/{anomaly_id}` | Status, priority or notes update |
@@ -189,6 +206,9 @@ deepdrishti_solar_twin_mvp/
 │   ├── main.py                 # FastAPI routes and workflow logic
 │   ├── db.py                   # SQLite schema, seed data and Digital Twin records
 │   ├── vision.py               # Runnable thermal-image demonstration pipeline
+│   ├── inverter_ml_features.py # Causal, identity-free feature pipeline
+│   ├── inverter_ml.py          # Isolation Forest artifact and candidate logic
+│   ├── train_inverter_ml.py    # Explicit offline training/evaluation command
 │   ├── data/                   # Runtime SQLite database
 │   └── static/
 │       ├── index.html
@@ -197,6 +217,7 @@ deepdrishti_solar_twin_mvp/
 │       ├── assets/             # Original synthetic evidence images
 │       └── uploads/            # Runtime inspection uploads
 ├── tests/test_app.py
+├── tests/test_inverter_ml.py
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── PRODUCT_BACKLOG.md

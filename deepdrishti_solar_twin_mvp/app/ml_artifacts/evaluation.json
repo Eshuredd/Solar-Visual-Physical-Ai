@@ -1,0 +1,1254 @@
+{
+  "metadata": {
+    "status": "experimental",
+    "created_at": "2026-10-09T06:07:28Z",
+    "model": {
+      "version": "isolation-forest-v1",
+      "feature_version": "inverter-features-v1",
+      "feature_names": [
+        "normalized_ac_power",
+        "normalized_dc_power",
+        "conversion_efficiency",
+        "expected_ac_residual",
+        "expected_dc_residual",
+        "production_ratio",
+        "dc_power_balance_error",
+        "inverter_temperature_c",
+        "ambient_temperature_c",
+        "temperature_rise_c",
+        "temperature_load_residual_c",
+        "recent_ac_change",
+        "rolling_ac_variability",
+        "rolling_efficiency_variation",
+        "rolling_expected_residual",
+        "negative_residual_persistence",
+        "peer_relative_difference"
+      ],
+      "random_state": 42,
+      "n_estimators": 250,
+      "threshold": 0.0698744715573896,
+      "score_semantics": "higher_is_more_abnormal",
+      "sklearn_version": "1.7.2"
+    },
+    "statistical_baseline": {
+      "version": "robust-residual-v1",
+      "feature_names": [
+        "expected_ac_residual",
+        "expected_dc_residual",
+        "temperature_load_residual_c",
+        "conversion_efficiency",
+        "dc_power_balance_error",
+        "rolling_ac_variability"
+      ],
+      "medians": {
+        "expected_ac_residual": -0.0027780023150157473,
+        "expected_dc_residual": -0.002391694159406168,
+        "temperature_load_residual_c": -2.469175055089279,
+        "conversion_efficiency": 0.9739631339731538,
+        "dc_power_balance_error": 2.0078375735278597e-09,
+        "rolling_ac_variability": 0.044867377584058066
+      },
+      "scales": {
+        "expected_ac_residual": 0.01130670825644477,
+        "expected_dc_residual": 0.011626958551504385,
+        "temperature_load_residual_c": 3.3725999462327545,
+        "conversion_efficiency": 0.01,
+        "dc_power_balance_error": 0.01,
+        "rolling_ac_variability": 0.017870717502177124
+      },
+      "threshold": 3.0417635697475776,
+      "score_semantics": "higher_is_more_abnormal"
+    },
+    "rules_version": "inverter-rules-v2a.2",
+    "training_partition": {
+      "name": "train",
+      "seeds": [
+        101,
+        103,
+        107,
+        109,
+        113
+      ],
+      "normal_rows": 2554
+    },
+    "calibration_partition": {
+      "name": "validation",
+      "seeds": [
+        211,
+        223
+      ],
+      "normal_rows": 1008
+    },
+    "parameter_freeze": "before test and final evaluation",
+    "operational_alert_writes": false,
+    "limitations": [
+      "trained and evaluated only on synthetic telemetry",
+      "candidate events require operator review and are not confirmed faults",
+      "data-quality outage detection remains the responsibility of deterministic monitoring"
+    ]
+  },
+  "dataset_audit": {
+    "dataset_version": "inverter-ml-synthetic-v2",
+    "partitions": {
+      "train": {
+        "seeds": [
+          101,
+          103,
+          107,
+          109,
+          113
+        ],
+        "cases": 40,
+        "scored_operating_rows": 3177,
+        "validated_normal_training_rows": 2554
+      },
+      "validation": {
+        "seeds": [
+          211,
+          223
+        ],
+        "cases": 16,
+        "scored_operating_rows": 1261,
+        "validated_normal_training_rows": 1008
+      },
+      "test": {
+        "seeds": [
+          307,
+          311
+        ],
+        "cases": 16,
+        "scored_operating_rows": 1289,
+        "validated_normal_training_rows": 1048
+      },
+      "final": {
+        "seeds": [
+          401,
+          409
+        ],
+        "cases": 16,
+        "scored_operating_rows": 1228,
+        "validated_normal_training_rows": 997
+      }
+    },
+    "locked_historical_seeds": [
+      731,
+      1291,
+      2027
+    ],
+    "leakage_controls": [
+      "disjoint generation seeds",
+      "non-overlapping seasonally varied two-day operating periods",
+      "no inverter identifier feature",
+      "causal rolling features",
+      "training-normal rows only",
+      "ground-truth labels excluded from feature vectors"
+    ]
+  },
+  "evaluation": {
+    "validation": {
+      "partition": "validation",
+      "seeds": [
+        211,
+        223
+      ],
+      "evaluation_scope": "equipment anomalies; telemetry data-quality scenarios are handled by deterministic monitoring and excluded",
+      "rules": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 0,
+        "false_negative_events": 2,
+        "event_level_precision": 1.0,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.889,
+        "false_positive_rate": 0.0,
+        "false_alerts_per_inverter_day": 0.0,
+        "mean_detection_latency_minutes": 48.75,
+        "mean_onset_error_minutes": 3.75,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 8,
+        "runtime_seconds": 0.0182
+      },
+      "statistical": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 7,
+        "false_positive_events": 8,
+        "false_negative_events": 3,
+        "event_level_precision": 0.467,
+        "event_level_recall": 0.7,
+        "event_level_f1": 0.56,
+        "false_positive_rate": 0.533,
+        "false_alerts_per_inverter_day": 2.5772,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 19.29,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 4,
+            "false_negative_events": 0,
+            "precision": 0.333,
+            "recall": 1.0,
+            "f1": 0.5
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 3,
+            "false_negative_events": 1,
+            "precision": 0.25,
+            "recall": 0.5,
+            "f1": 0.333
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 15,
+        "runtime_seconds": 0.0014
+      },
+      "isolation_forest": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 6,
+        "false_positive_events": 8,
+        "false_negative_events": 4,
+        "event_level_precision": 0.429,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.5,
+        "false_positive_rate": 0.571,
+        "false_alerts_per_inverter_day": 2.5772,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 0,
+            "false_negative_events": 1,
+            "precision": 1.0,
+            "recall": 0.5,
+            "f1": 0.667
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.286,
+            "recall": 1.0,
+            "f1": 0.445
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 2,
+            "false_negative_events": 1,
+            "precision": 0.333,
+            "recall": 0.5,
+            "f1": 0.4
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 14,
+        "runtime_seconds": 0.0159
+      },
+      "hybrid": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 8,
+        "false_negative_events": 2,
+        "event_level_precision": 0.5,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.615,
+        "false_positive_rate": 0.5,
+        "false_alerts_per_inverter_day": 2.5772,
+        "mean_detection_latency_minutes": 48.75,
+        "mean_onset_error_minutes": 3.75,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.286,
+            "recall": 1.0,
+            "f1": 0.445
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 2,
+            "false_negative_events": 0,
+            "precision": 0.5,
+            "recall": 1.0,
+            "f1": 0.667
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 16
+      }
+    },
+    "test": {
+      "partition": "test",
+      "seeds": [
+        307,
+        311
+      ],
+      "evaluation_scope": "equipment anomalies; telemetry data-quality scenarios are handled by deterministic monitoring and excluded",
+      "rules": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 0,
+        "false_negative_events": 2,
+        "event_level_precision": 1.0,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.889,
+        "false_positive_rate": 0.0,
+        "false_alerts_per_inverter_day": 0.0,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 8,
+        "runtime_seconds": 0.0187
+      },
+      "statistical": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 6,
+        "false_positive_events": 8,
+        "false_negative_events": 4,
+        "event_level_precision": 0.429,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.5,
+        "false_positive_rate": 0.571,
+        "false_alerts_per_inverter_day": 2.7331,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 20.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": false,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.286,
+            "recall": 1.0,
+            "f1": 0.445
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 0,
+            "false_positive_events": 2,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 14,
+        "runtime_seconds": 0.0014
+      },
+      "isolation_forest": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 6,
+        "false_positive_events": 9,
+        "false_negative_events": 4,
+        "event_level_precision": 0.4,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.48,
+        "false_positive_rate": 0.6,
+        "false_alerts_per_inverter_day": 3.0747,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 2.5,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": false,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 3,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.286,
+            "recall": 1.0,
+            "f1": 0.445
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 15,
+        "runtime_seconds": 0.0164
+      },
+      "hybrid": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 9,
+        "false_negative_events": 2,
+        "event_level_precision": 0.471,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.593,
+        "false_positive_rate": 0.529,
+        "false_alerts_per_inverter_day": 3.0747,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": false,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 3,
+            "false_negative_events": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.286,
+            "recall": 1.0,
+            "f1": 0.445
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 1,
+            "false_negative_events": 0,
+            "precision": 0.667,
+            "recall": 1.0,
+            "f1": 0.8
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 17
+      }
+    },
+    "final": {
+      "partition": "final",
+      "seeds": [
+        401,
+        409
+      ],
+      "evaluation_scope": "equipment anomalies; telemetry data-quality scenarios are handled by deterministic monitoring and excluded",
+      "rules": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 0,
+        "false_negative_events": 2,
+        "event_level_precision": 1.0,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.889,
+        "false_positive_rate": 0.0,
+        "false_alerts_per_inverter_day": 0.0,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 8,
+        "runtime_seconds": 0.0182
+      },
+      "statistical": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 5,
+        "false_positive_events": 8,
+        "false_negative_events": 5,
+        "event_level_precision": 0.385,
+        "event_level_recall": 0.5,
+        "event_level_f1": 0.435,
+        "false_positive_rate": 0.615,
+        "false_alerts_per_inverter_day": 2.676,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 18.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 0,
+            "false_negative_events": 1,
+            "precision": 1.0,
+            "recall": 0.5,
+            "f1": 0.667
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 8,
+            "false_negative_events": 0,
+            "precision": 0.2,
+            "recall": 1.0,
+            "f1": 0.333
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 13,
+        "runtime_seconds": 0.0014
+      },
+      "isolation_forest": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 6,
+        "false_positive_events": 6,
+        "false_negative_events": 4,
+        "event_level_precision": 0.5,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.545,
+        "false_positive_rate": 0.5,
+        "false_alerts_per_inverter_day": 2.007,
+        "mean_detection_latency_minutes": 17.5,
+        "mean_onset_error_minutes": 2.5,
+        "mean_offset_error_minutes": -2.5,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 6,
+            "false_negative_events": 0,
+            "precision": 0.25,
+            "recall": 1.0,
+            "f1": 0.4
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 12,
+        "runtime_seconds": 0.0154
+      },
+      "hybrid": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 8,
+        "false_positive_events": 6,
+        "false_negative_events": 2,
+        "event_level_precision": 0.571,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.666,
+        "false_positive_rate": 0.429,
+        "false_alerts_per_inverter_day": 2.007,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 2,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 2,
+            "false_positive_events": 6,
+            "false_negative_events": 0,
+            "precision": 0.25,
+            "recall": 1.0,
+            "f1": 0.4
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 14
+      }
+    },
+    "historical_locked": {
+      "partition": "historical_locked",
+      "seeds": [
+        731,
+        1291,
+        2027
+      ],
+      "evaluation_scope": "equipment anomalies; telemetry data-quality scenarios are handled by deterministic monitoring and excluded",
+      "rules": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 12,
+        "false_positive_events": 0,
+        "false_negative_events": 3,
+        "event_level_precision": 1.0,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.889,
+        "false_positive_rate": 0.0,
+        "false_alerts_per_inverter_day": 0.0,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 3,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 12,
+        "runtime_seconds": 0.0278
+      },
+      "statistical": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 9,
+        "false_positive_events": 11,
+        "false_negative_events": 6,
+        "event_level_precision": 0.45,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.514,
+        "false_positive_rate": 0.55,
+        "false_alerts_per_inverter_day": 2.5631,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 25.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 1,
+            "precision": 1.0,
+            "recall": 0.667,
+            "f1": 0.8
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 0,
+            "false_negative_events": 3,
+            "precision": null,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 3,
+            "false_positive_events": 5,
+            "false_negative_events": 0,
+            "precision": 0.375,
+            "recall": 1.0,
+            "f1": 0.545
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 6,
+            "false_negative_events": 2,
+            "precision": 0.143,
+            "recall": 0.333,
+            "f1": 0.2
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 20,
+        "runtime_seconds": 0.0021
+      },
+      "isolation_forest": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 9,
+        "false_positive_events": 10,
+        "false_negative_events": 6,
+        "event_level_precision": 0.474,
+        "event_level_recall": 0.6,
+        "event_level_f1": 0.53,
+        "false_positive_rate": 0.526,
+        "false_alerts_per_inverter_day": 2.3301,
+        "mean_detection_latency_minutes": 15.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 5.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 2,
+            "false_positive_events": 0,
+            "false_negative_events": 1,
+            "precision": 1.0,
+            "recall": 0.667,
+            "f1": 0.8
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 3,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 3,
+            "false_positive_events": 6,
+            "false_negative_events": 0,
+            "precision": 0.333,
+            "recall": 1.0,
+            "f1": 0.5
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 1,
+            "false_positive_events": 3,
+            "false_negative_events": 2,
+            "precision": 0.25,
+            "recall": 0.333,
+            "f1": 0.286
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 19,
+        "runtime_seconds": 0.0215
+      },
+      "hybrid": {
+        "scope": "synthetic_scenario_evaluation_only",
+        "matching": {
+          "method": "greedy one-to-one maximum temporal overlap",
+          "category_required": true,
+          "overlap_tolerance_minutes": 30
+        },
+        "true_positive_events": 12,
+        "false_positive_events": 10,
+        "false_negative_events": 3,
+        "event_level_precision": 0.545,
+        "event_level_recall": 0.8,
+        "event_level_f1": 0.648,
+        "false_positive_rate": 0.455,
+        "false_alerts_per_inverter_day": 2.3301,
+        "mean_detection_latency_minutes": 45.0,
+        "mean_onset_error_minutes": 0.0,
+        "mean_offset_error_minutes": 0.0,
+        "duplicate_incident_count": 0,
+        "duplicate_alert_count": 0,
+        "normal_operation_passed": true,
+        "by_anomaly_type": {
+          "ac_conversion_underperformance": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          },
+          "intermittent_derating": {
+            "true_positive_events": 0,
+            "false_positive_events": 1,
+            "false_negative_events": 3,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": null
+          },
+          "inverter_overheating": {
+            "true_positive_events": 3,
+            "false_positive_events": 6,
+            "false_negative_events": 0,
+            "precision": 0.333,
+            "recall": 1.0,
+            "f1": 0.5
+          },
+          "pv_side_underperformance": {
+            "true_positive_events": 3,
+            "false_positive_events": 3,
+            "false_negative_events": 0,
+            "precision": 0.5,
+            "recall": 1.0,
+            "f1": 0.667
+          },
+          "unexpected_shutdown": {
+            "true_positive_events": 3,
+            "false_positive_events": 0,
+            "false_negative_events": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0
+          }
+        },
+        "limitations": "Metrics use synthetic scenarios and do not represent real-world fault-detection accuracy.",
+        "candidate_count": 22
+      }
+    }
+  },
+  "resource_usage": {
+    "artifact_bytes": 3445968,
+    "training_rows": 2554
+  }
+}

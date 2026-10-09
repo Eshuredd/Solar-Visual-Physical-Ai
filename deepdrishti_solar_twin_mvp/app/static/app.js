@@ -610,13 +610,15 @@ async function openInverter(inverterId) {
   renderOverlays();
   try {
     await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze`, { method: "POST" });
-    const [inverter, telemetry, alerts] = await Promise.all([
+    const [inverter, telemetry, alerts, mlScores, mlComparison] = await Promise.all([
       api(`/api/inverters/${encodeURIComponent(inverterId)}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/alerts`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-scores`).catch(error => ({ enabled:false, reason:error.message })),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-comparison`).catch(error => ({ enabled:false, reason:error.message })),
     ]);
     const active = alerts.find(item => item.lifecycle_status !== "Resolved") || alerts[0];
-    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, selectedAlertId: active?.alert_id || null };
+    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
   } catch (error) {
     state.inverterPanel = { loading: false, inverterId, error: error.message };
   }
@@ -654,6 +656,28 @@ function inverterChart(readings, series, ariaLabel, alerts = []) {
 }
 
 function alertLabel(value) { return String(value || '').replaceAll('_',' ').replace(/\b\w/g, char=>char.toUpperCase()); }
+
+function renderExperimentalMl(panel) {
+  const scores = panel.mlScores || {};
+  const comparison = panel.mlComparison || {};
+  if (!scores.enabled) return `<div class="detail-section ml-experimental"><div class="detail-section-title">Experimental ML review layer</div><div class="synthetic-notice">${icon("info")} ML is disabled: ${escapeHtml(scores.reason || 'no compatible offline-trained artifact is installed')}. Rule-based monitoring remains active.</div></div>`;
+  const chartRows = (scores.scores || []).map(row => ({ ...row, decision_threshold: scores.threshold }));
+  const candidates = comparison.ml_candidates || [];
+  const agreement = comparison.agreement || [];
+  return `<div class="detail-section ml-experimental">
+    <div class="detail-section-title">Experimental ML review layer <span class="tag warning">Not an operational alert</span></div>
+    <div class="synthetic-notice strong">${icon("info")} Synthetic-data novelty scores are review aids only. They do not diagnose a fault, change alert lifecycle, or create work.</div>
+    <div class="chip-row"><span class="tag">${escapeHtml(scores.model_version)}</span><span class="tag">${escapeHtml(scores.feature_version)}</span><span class="tag">Threshold ${formatNumber(scores.threshold,3)}</span><span class="tag">Higher = more unusual</span></div>
+    ${inverterChart(chartRows,[{field:'anomaly_score',label:'Novelty score',color:'#c89cff'},{field:'decision_threshold',label:'Review threshold',color:'#ffc166'}],'Experimental anomaly score and review threshold')}
+    <div class="detail-section-title" style="margin-top:12px">Candidate windows and rule comparison</div>
+    ${candidates.length ? `<div class="inverter-alert-list">${candidates.map((candidate,index)=>{
+      const match = agreement[index]?.rule_agreement;
+      const deviations = (candidate.contributing_feature_deviations || []).map(item=>`${alertLabel(item.feature)} ${formatNumber(item.deviation,2)}`).join(' · ');
+      return `<div class="inverter-alert-card"><i class="severity-bar ${match?'medium':'low'}"></i><span><strong>${escapeHtml(alertLabel(candidate.anomaly_category))}</strong><small>${formatDate(candidate.onset_timestamp)} · peak ${formatNumber(candidate.peak_anomaly_score,3)} · ${match?'agrees with an overlapping rule event':'ML-only review candidate'}</small><small>${escapeHtml(deviations || 'No deviation explanation available')}</small></span><span class="tag ${match?'success':'warning'}">${match?'Agreement':'Disagreement'}</span></div>`;
+    }).join('')}</div>` : `<div class="empty-indicators">No ML review candidates crossed the frozen threshold for this period.</div>`}
+    <div class="recommendation" style="margin-top:10px"><strong>Limitations</strong><p>${escapeHtml((scores.limitations || []).join(' · '))}</p></div>
+  </div>`;
+}
 
 function selectInverterAlert(alertId) {
   if (!state.inverterPanel) return;
@@ -704,6 +728,7 @@ function renderInverterDrawer() {
         </div></div>
         <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power',alerts)}</div>
         <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power',alerts)}</div>
+        ${renderExperimentalMl(panel)}
         <div class="detail-section"><div class="detail-section-title">Telemetry anomaly events</div>${alerts.length ? `<div class="inverter-alert-list">${alerts.map(alert=>`<button class="inverter-alert-card ${alert.alert_id===selectedAlert?.alert_id?'selected':''}" onclick="selectInverterAlert('${alert.alert_id}')"><i class="severity-bar ${className(alert.severity)}"></i><span><strong>${escapeHtml(alertLabel(alert.anomaly_category))}</strong><small>${escapeHtml(alert.severity)} · ${formatDate(alert.onset_timestamp || alert.start_timestamp)} · ${alert.active_duration_minutes ?? '—'} active min</small></span>${statusPill(alert.lifecycle_status)}</button>`).join('')}</div>` : `<div class="empty-indicators">No event-based alerts were detected for this period.</div>`}</div>
         ${selectedAlert ? `<div class="detail-section alert-evidence"><div class="detail-section-title">Selected telemetry evidence window</div><div class="chip-row">${priorityPill(selectedAlert.severity)}${statusPill(selectedAlert.lifecycle_status)}<span class="tag">${selectedAlert.active_duration_minutes ?? 0} active min</span><span class="tag">${selectedAlert.wall_clock_duration_minutes ?? selectedAlert.duration_minutes} wall-clock min</span><span class="tag">Unconfirmed cause</span></div><div class="alert-timestamp-grid"><span>Onset<strong>${escapeHtml(selectedAlert.onset_timestamp)}</strong></span><span>Detection eligible<strong>${escapeHtml(selectedAlert.detection_eligible_timestamp)}</strong></span><span>Last abnormal<strong>${escapeHtml(selectedAlert.last_abnormal_timestamp)}</strong></span><span>Recovery<strong>${escapeHtml(selectedAlert.recovery_timestamp || 'Not observed')}</strong></span></div>${inverterChart(evidenceReadings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual AC',color:'#9dff75'},{field:'dc_power_kw',label:'DC input',color:'#5be7d4'}],'Telemetry around the selected alert')}<div class="recommendation" style="margin-top:10px"><strong>Evidence-backed explanation</strong><p>${escapeHtml(selectedAlert.explanation)}</p></div><div class="recommendation" style="margin-top:8px"><strong>Investigation recommendation</strong><p>${escapeHtml(selectedAlert.recommended_investigation)}</p></div><div class="inline-actions alert-actions">${['Acknowledged','Investigating','Resolved'].map(status=>`<button class="button small ${selectedAlert.lifecycle_status===status?'primary':''}" onclick="updateInverterAlert('${selectedAlert.alert_id}','${status}')">${status}</button>`).join('')}</div><div class="timeline alert-history">${selectedAlert.lifecycle_history.map(item=>`<div class="timeline-item"><strong>${escapeHtml(item.status)}</strong><p>${escapeHtml(item.note)} · ${escapeHtml(item.actor)}</p><time>${formatDate(item.at)}</time></div>`).join('')}</div></div>`:''}
         <div class="detail-section"><div class="detail-section-title">Recent abnormal performance indicators</div>${indicators.length ? `<div class="indicator-list">${indicators.map(item=>`<div class="indicator-item ${escapeHtml(item.severity)}"><strong>${escapeHtml(item.code.replaceAll('_',' '))}</strong><p>${escapeHtml(item.message)}</p></div>`).join('')}</div>` : `<div class="empty-indicators">No rule-based abnormal-performance indicators in this period.</div>`}</div>

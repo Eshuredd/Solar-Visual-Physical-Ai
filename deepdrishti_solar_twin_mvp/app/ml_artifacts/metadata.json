@@ -1,0 +1,88 @@
+{
+  "status": "experimental",
+  "created_at": "2026-10-09T06:07:28Z",
+  "model": {
+    "version": "isolation-forest-v1",
+    "feature_version": "inverter-features-v1",
+    "feature_names": [
+      "normalized_ac_power",
+      "normalized_dc_power",
+      "conversion_efficiency",
+      "expected_ac_residual",
+      "expected_dc_residual",
+      "production_ratio",
+      "dc_power_balance_error",
+      "inverter_temperature_c",
+      "ambient_temperature_c",
+      "temperature_rise_c",
+      "temperature_load_residual_c",
+      "recent_ac_change",
+      "rolling_ac_variability",
+      "rolling_efficiency_variation",
+      "rolling_expected_residual",
+      "negative_residual_persistence",
+      "peer_relative_difference"
+    ],
+    "random_state": 42,
+    "n_estimators": 250,
+    "threshold": 0.0698744715573896,
+    "score_semantics": "higher_is_more_abnormal",
+    "sklearn_version": "1.7.2"
+  },
+  "statistical_baseline": {
+    "version": "robust-residual-v1",
+    "feature_names": [
+      "expected_ac_residual",
+      "expected_dc_residual",
+      "temperature_load_residual_c",
+      "conversion_efficiency",
+      "dc_power_balance_error",
+      "rolling_ac_variability"
+    ],
+    "medians": {
+      "expected_ac_residual": -0.0027780023150157473,
+      "expected_dc_residual": -0.002391694159406168,
+      "temperature_load_residual_c": -2.469175055089279,
+      "conversion_efficiency": 0.9739631339731538,
+      "dc_power_balance_error": 2.0078375735278597e-09,
+      "rolling_ac_variability": 0.044867377584058066
+    },
+    "scales": {
+      "expected_ac_residual": 0.01130670825644477,
+      "expected_dc_residual": 0.011626958551504385,
+      "temperature_load_residual_c": 3.3725999462327545,
+      "conversion_efficiency": 0.01,
+      "dc_power_balance_error": 0.01,
+      "rolling_ac_variability": 0.017870717502177124
+    },
+    "threshold": 3.0417635697475776,
+    "score_semantics": "higher_is_more_abnormal"
+  },
+  "rules_version": "inverter-rules-v2a.2",
+  "training_partition": {
+    "name": "train",
+    "seeds": [
+      101,
+      103,
+      107,
+      109,
+      113
+    ],
+    "normal_rows": 2554
+  },
+  "calibration_partition": {
+    "name": "validation",
+    "seeds": [
+      211,
+      223
+    ],
+    "normal_rows": 1008
+  },
+  "parameter_freeze": "before test and final evaluation",
+  "operational_alert_writes": false,
+  "limitations": [
+    "trained and evaluated only on synthetic telemetry",
+    "candidate events require operator review and are not confirmed faults",
+    "data-quality outage detection remains the responsibility of deterministic monitoring"
+  ]
+}

@@ -19,6 +19,9 @@ from pydantic import BaseModel, Field
 from .db import DB_PATH, connect, init_db, rows_to_dicts
 from .inverter_anomaly import CATEGORIES, METHOD_VERSION, detect_anomaly_events, evaluate_synthetic_events
 from .inverter_evaluation import generate_held_out_cases
+from .inverter_ml import DEFAULT_ARTIFACT_ROOT, MODEL_VERSION, candidate_events, load_artifact
+from .inverter_ml_baselines import BASELINE_VERSION
+from .inverter_ml_features import FEATURE_VERSION, build_feature_rows, build_peer_context
 from .inverter_monitoring import (
     canonical_utc_timestamp,
     conversion_efficiency_pct,
@@ -32,6 +35,8 @@ APP_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = APP_ROOT / "static"
 UPLOAD_ROOT = STATIC_ROOT / "uploads"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+ML_ARTIFACT_PATH = DEFAULT_ARTIFACT_ROOT / "inverter_anomaly.joblib"
+ML_EVALUATION_PATH = DEFAULT_ARTIFACT_ROOT / "evaluation.json"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -128,6 +133,26 @@ def _read_inverter_telemetry(inverter_id: str, start: str | None = None, end: st
             "SELECT * FROM inverter_telemetry WHERE " + " AND ".join(where) + " ORDER BY timestamp",
             params,
         ))
+
+
+def _load_ml_artifact() -> tuple[dict[str, Any] | None, str | None]:
+    if not ML_ARTIFACT_PATH.exists():
+        return None, "Experimental ML artifact is not installed; deterministic monitoring remains available."
+    try:
+        return load_artifact(ML_ARTIFACT_PATH), None
+    except (OSError, ValueError, TypeError) as exc:
+        return None, f"Experimental ML artifact is unavailable: {exc}"
+
+
+def _ml_feature_rows(inverter: dict[str, Any], start: str | None, end: str | None) -> list[dict[str, Any]]:
+    with connect() as conn:
+        peers = rows_to_dicts(conn.execute(
+            "SELECT * FROM inverters WHERE site_id=? ORDER BY inverter_id", (inverter["site_id"],)
+        ))
+    equipment = [(peer, _read_inverter_telemetry(peer["inverter_id"], start, end)) for peer in peers]
+    peer_context = build_peer_context(equipment)
+    selected = next(readings for peer, readings in equipment if peer["inverter_id"] == inverter["inverter_id"])
+    return build_feature_rows(inverter, selected, peer_context)
 
 
 def _inverter_summary_payload(inverter: dict[str, Any], start: str | None = None, end: str | None = None) -> dict[str, Any]:
@@ -500,6 +525,100 @@ def inverter_alert_evaluation(site_id: str = "site-001") -> dict[str, Any]:
         "regression_fixture": fixture,
         "held_out": held_out,
         "held_out_generator": {"version": held_out_data["generator_version"], "seeds": held_out_data["seeds"], "case_count": len(held_out_data["cases"])},
+    }
+
+
+@app.get("/api/ml/model")
+def ml_model_metadata() -> dict[str, Any]:
+    artifact, reason = _load_ml_artifact()
+    if artifact is None:
+        return {
+            "enabled": False, "status": "experimental_unavailable", "reason": reason,
+            "feature_version": FEATURE_VERSION, "operational_alert_writes": False,
+        }
+    return {
+        "enabled": True,
+        "status": "experimental",
+        **artifact["metadata"],
+        "artifact_schema_version": artifact["schema_version"],
+        "operational_alert_writes": False,
+    }
+
+
+@app.get("/api/ml/evaluation")
+def ml_evaluation() -> dict[str, Any]:
+    if not ML_EVALUATION_PATH.exists():
+        return {"enabled": False, "status": "experimental_unavailable", "reason": "No offline evaluation report is installed."}
+    try:
+        return {"enabled": True, "status": "experimental", **json.loads(ML_EVALUATION_PATH.read_text(encoding="utf-8"))}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"enabled": False, "status": "experimental_unavailable", "reason": f"Evaluation report is unavailable: {exc}"}
+
+
+@app.get("/api/inverters/{inverter_id}/ml-scores")
+def inverter_ml_scores(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    artifact, reason = _load_ml_artifact()
+    if artifact is None:
+        return {"enabled": False, "status": "experimental_unavailable", "reason": reason, "inverter_id": inverter_id, "scores": [], "candidates": []}
+    rows = _ml_feature_rows(inverter, start, end)
+    detector = artifact["detector"]
+    scored = detector.score_rows(rows)
+    candidates = candidate_events(scored, detector.threshold, "isolation_forest", MODEL_VERSION)
+    return {
+        "enabled": True,
+        "status": "experimental_review_only",
+        "inverter_id": inverter_id,
+        "model_version": MODEL_VERSION,
+        "feature_version": FEATURE_VERSION,
+        "threshold": detector.threshold,
+        "score_semantics": "higher_is_more_abnormal",
+        "scores": [{
+            "timestamp": row["timestamp"], "anomaly_score": round(row["anomaly_score"], 6),
+            "above_threshold": row["anomaly_score"] >= detector.threshold,
+        } for row in scored],
+        "candidates": candidates,
+        "limitations": artifact["metadata"].get("limitations", []),
+        "operational_alert_writes": False,
+    }
+
+
+@app.get("/api/inverters/{inverter_id}/ml-comparison")
+def inverter_ml_comparison(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    artifact, reason = _load_ml_artifact()
+    if artifact is None:
+        return {"enabled": False, "status": "experimental_unavailable", "reason": reason, "inverter_id": inverter_id}
+    readings = _read_inverter_telemetry(inverter_id, start, end)
+    rows = _ml_feature_rows(inverter, start, end)
+    detector, baseline = artifact["detector"], artifact["baseline"]
+    ml_candidates = candidate_events(detector.score_rows(rows), detector.threshold, "isolation_forest", MODEL_VERSION)
+    statistical_candidates = candidate_events(baseline.score_rows(rows), baseline.threshold, "robust_statistical_baseline", BASELINE_VERSION)
+    rules = [{**event, "inverter_id": inverter_id} for event in detect_anomaly_events(inverter, readings)]
+    agreements = []
+    for ml_candidate in ml_candidates:
+        matching = [event for event in rules if event["anomaly_category"] == ml_candidate["anomaly_category"] and event["start_timestamp"] <= ml_candidate["end_timestamp"] and ml_candidate["start_timestamp"] <= event["end_timestamp"]]
+        agreements.append({
+            "candidate_start": ml_candidate["start_timestamp"],
+            "anomaly_category": ml_candidate["anomaly_category"],
+            "rule_agreement": bool(matching),
+        })
+    return {
+        "enabled": True,
+        "status": "experimental_review_only",
+        "inverter_id": inverter_id,
+        "rules_version": METHOD_VERSION,
+        "model_version": MODEL_VERSION,
+        "rule_events": rules,
+        "statistical_candidates": statistical_candidates,
+        "ml_candidates": ml_candidates,
+        "agreement": agreements,
+        "summary": {
+            "rule_event_count": len(rules), "statistical_candidate_count": len(statistical_candidates),
+            "ml_candidate_count": len(ml_candidates), "rule_ml_agreement_count": sum(item["rule_agreement"] for item in agreements),
+        },
+        "operational_alert_writes": False,
+        "notice": "Experimental synthetic-data model output for review only; candidates are not confirmed faults or operational alerts.",
     }
 
 

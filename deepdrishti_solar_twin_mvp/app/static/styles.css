@@ -1763,6 +1763,12 @@ img {
 }
 
 .detail-drawer.inverter-drawer { width: min(760px, 98vw); }
+.ml-experimental {
+  border: 1px solid rgba(200, 156, 255, .34);
+  border-radius: 14px;
+  padding: 14px;
+  background: linear-gradient(145deg, rgba(200, 156, 255, .07), rgba(8, 23, 17, .3));
+}
 
 .inverter-loading { display: grid; gap: 14px; }
 .inverter-loading .skeleton { height: 150px; border-radius: 14px; }
