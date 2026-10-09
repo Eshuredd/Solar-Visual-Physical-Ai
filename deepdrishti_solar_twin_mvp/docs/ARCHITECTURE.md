@@ -29,7 +29,7 @@ FastAPI
   ├─ Event-based inverter anomaly detection and lifecycle APIs
   └─ CSV export
           │
-          ├─ SQLite: sites, inspections, anomalies, tasks, inverters, telemetry, inverter alerts
+          ├─ SQLite: sites, inspections, anomalies, tasks, inverters, telemetry, inverter alerts, topology and reviewed evidence links
           └─ Local static storage: RGB/thermal evidence and uploads
 ```
 
@@ -87,7 +87,20 @@ energy, expected power and relative yield. Its expected baseline is normalized b
 rated AC capacity, irradiance and temperature. Night, low-light, startup,
 shutdown, curtailment and missing-data samples are excluded from performance
 classification. Electrical indicators remain separate from image-derived anomaly
-records until a future evidence-linking workflow establishes a justified relation.
+records. Phase 3A can correlate them through explicit, provenance-bearing
+inverter → MPPT → string → physical-group relationships while preserving the
+difference between correlated evidence and a verified physical cause.
+
+### Electrical-to-physical topology
+
+- Site-scoped blocks, variable MPPT inputs and variable PV strings
+- Contiguous physical module groups connected through explicit join records
+- Foreign keys, uniqueness constraints, indexes and cross-site guard triggers
+- Mapping classification (`verified_as_built`, `synthetic_demo`, `unverified`)
+- Explicit complete, partial or unknown coverage
+- Human-reviewed alert/finding associations with append-only transition history
+
+See [PHASE3A_TOPOLOGY.md](PHASE3A_TOPOLOGY.md) for demo assumptions and real-deployment verification requirements.
 
 ### Inverter alert
 

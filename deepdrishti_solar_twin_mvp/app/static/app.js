@@ -114,6 +114,8 @@ function formatNumber(value, digits = 0) {
   return new Intl.NumberFormat("en-IN", { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(Number(value || 0));
 }
 
+function knownCount(value) { return value == null ? "Unknown" : formatNumber(value); }
+
 function formatDate(value) {
   if (!value) return "—";
   const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
@@ -431,7 +433,7 @@ function renderSiteDashboard() {
             <div class="detail-metrics">
               <div class="detail-metric"><span>Owner</span><strong style="font-size:12px">${escapeHtml(state.site.owner)}</strong></div>
               <div class="detail-metric"><span>Coordinates</span><strong style="font-size:12px">${state.site.latitude.toFixed(3)}, ${state.site.longitude.toFixed(3)}</strong></div>
-              <div class="detail-metric"><span>Modules</span><strong>${formatNumber(state.assets.hierarchy.modules)}</strong></div>
+              <div class="detail-metric"><span>Mapped modules</span><strong>${knownCount(state.assets.hierarchy.modules)}</strong></div>
             </div>
             <div class="recommendation" style="margin-top:14px"><strong>Electrical and visual evidence remain separate</strong><p>The inverter indicators use synthetic electrical telemetry. Thermal and visual findings stay linked to physical assets independently; a reviewer must establish evidence before creating a diagnosis or dispatching field work.</p></div>
           </div>
@@ -552,15 +554,17 @@ function renderMapStage(items) {
 
 function farmMapSvg(items, zoom = 1.1, mini = false) {
   const rowBlocks = [
-    {id:"B1", x:75, y:90, w:350, h:170, inv:"INV-01 / 03"},
-    {id:"B2", x:565, y:90, w:350, h:170, inv:"INV-04 / 06"},
-    {id:"C1", x:75, y:355, w:350, h:170, inv:"INV-07 / 09"},
-    {id:"C2", x:565, y:355, w:350, h:170, inv:"INV-10 / 12"},
+    {id:"B1", x:75, y:90, w:350, h:170, inv:"INV-01 / 03", inverters:[1,2,3]},
+    {id:"B2", x:565, y:90, w:350, h:170, inv:"INV-04 / 06", inverters:[4,5,6]},
+    {id:"C1", x:75, y:355, w:350, h:170, inv:"INV-07 / 09", inverters:[7,8,9]},
+    {id:"C2", x:565, y:355, w:350, h:170, inv:"INV-10 / 12", inverters:[10,11,12]},
   ];
+  const selectedInverter = state.inverterPanel?.inverter?.inverter_id || state.inverterPanel?.inverterId;
+  const highlightedBlocks = state.inverterPanel?.topology?.blocks || [];
   const rows = rowBlocks.map(block => {
     const rowHeight = block.h / 15;
-    return `<g>${Array.from({length:14}, (_, i) => `<rect class="solar-row" x="${block.x+8+(i%2)*4}" y="${block.y+10+i*rowHeight}" width="${block.w-35}" height="${Math.max(4,rowHeight-4)}" rx="2"/>`).join("")}
-      <rect class="inverter-pad" x="${block.x+block.w-23}" y="${block.y+block.h/2-17}" width="22" height="34" rx="4"/>
+    return `<g class="${highlightedBlocks.includes(block.id)?'electrical-block-highlight':''}">${Array.from({length:14}, (_, i) => `<rect class="solar-row" x="${block.x+8+(i%2)*4}" y="${block.y+10+i*rowHeight}" width="${block.w-35}" height="${Math.max(4,rowHeight-4)}" rx="2"/>`).join("")}
+      ${block.inverters.map((number,index)=>{const id=`site-001-INV-${String(number).padStart(2,'0')}`;return `<rect class="inverter-pad selectable ${selectedInverter===id?'selected':''}" x="${block.x+block.w-23}" y="${block.y+54+index*22}" width="22" height="18" rx="4" onclick="openInverter('${id}')"><title>Open INV-${String(number).padStart(2,'0')}</title></rect>`}).join('')}
       ${state.layers.labels && !mini ? `<text class="block-label" x="${block.x}" y="${block.y-12}">${block.id}</text><text class="block-sub" x="${block.x+28}" y="${block.y-12}">${block.inv}</text><text class="inverter-label" x="${block.x+block.w-19}" y="${block.y+block.h/2+2}">INV</text>` : ""}
     </g>`;
   }).join("");
@@ -610,24 +614,26 @@ async function openInverter(inverterId) {
   renderOverlays();
   try {
     await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze`, { method: "POST" });
-    const [inverter, telemetry, alerts, mlScores, mlComparison] = await Promise.all([
+    const [inverter, telemetry, alerts, topology, mlScores, mlComparison] = await Promise.all([
       api(`/api/inverters/${encodeURIComponent(inverterId)}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/alerts`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/topology`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-scores`).catch(error => ({ enabled:false, reason:error.message })),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-comparison`).catch(error => ({ enabled:false, reason:error.message })),
     ]);
     const active = alerts.find(item => item.lifecycle_status !== "Resolved") || alerts[0];
-    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
+    const evidence = active ? await api(`/api/inverter-alerts/${encodeURIComponent(active.alert_id)}/evidence`) : null;
+    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, topology, evidence, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
   } catch (error) {
     state.inverterPanel = { loading: false, inverterId, error: error.message };
   }
-  renderOverlays();
+  if (state.view === "twin") render(); else renderOverlays();
 }
 
 function closeInverter() {
   state.inverterPanel = null;
-  renderOverlays();
+  if (state.view === "twin") render(); else renderOverlays();
 }
 
 function inverterChart(readings, series, ariaLabel, alerts = []) {
@@ -679,10 +685,68 @@ function renderExperimentalMl(panel) {
   </div>`;
 }
 
-function selectInverterAlert(alertId) {
+function renderTopologyEvidence(panel, selectedAlert) {
+  const topology = panel.topology || {};
+  const evidence = panel.evidence;
+  if (!topology.available) return `<div class="detail-section topology-section"><div class="detail-section-title">Electrical-to-physical topology</div><div class="synthetic-notice">${icon("info")} ${escapeHtml(topology.message || 'Topology unavailable')}. Counts and relationships remain explicitly unknown.</div></div>`;
+  const mppts = topology.mppts || [];
+  const mappingLabel = topology.is_verified_as_built ? 'Verified as-built' : 'Simulated mapping — not as-built';
+  const findings = evidence?.related_visual_findings || [];
+  const associations = evidence?.reviewed_associations || [];
+  const associationByFinding = Object.fromEntries(associations.map(item=>[item.anomaly_id,item]));
+  return `<div class="detail-section topology-section">
+    <div class="detail-section-title">Connected electrical and physical assets <span class="tag ${topology.is_verified_as_built?'success':'warning'}">${mappingLabel}</span></div>
+    <div class="synthetic-notice strong">${icon("info")} ${escapeHtml(topology.message)} Spatial proximity alone is not evidence of a shared electrical cause.</div>
+    <div class="detail-metrics inverter-metrics topology-metrics">
+      <div class="detail-metric"><span>Connected block</span><strong>${escapeHtml((topology.blocks || []).join(', ') || 'Unknown')}</strong></div>
+      <div class="detail-metric"><span>MPPT inputs</span><strong>${topology.mppt_count ?? 'Unknown'}</strong></div>
+      <div class="detail-metric"><span>PV strings</span><strong>${topology.string_count ?? 'Unknown'}</strong></div>
+      <div class="detail-metric"><span>Mapped demo modules</span><strong>${topology.mapped_module_count ?? 'Unknown'}</strong></div>
+    </div>
+    <div class="topology-tree">${mppts.map(mppt=>`<details><summary>${escapeHtml(mppt.label)} <span>${mppt.strings.length} string${mppt.strings.length===1?'':'s'}</span></summary>${mppt.strings.map(string=>`<div class="topology-string"><strong>${escapeHtml(string.label)}</strong><span>${string.asset_group ? `${escapeHtml(string.asset_group.block_code)} · rows ${string.asset_group.row_start}–${string.asset_group.row_end} · ${string.asset_group.mapped_module_count} module positions` : 'Physical mapping missing'}</span></div>`).join('')}</details>`).join('')}</div>
+    ${selectedAlert ? `<div class="detail-section-title" style="margin-top:14px">Related visual and thermal evidence</div>
+      ${panel.evidenceLoading ? '<div class="skeleton"></div>' : findings.length ? `<div class="related-findings">${findings.map(finding=>{
+        const association = associationByFinding[finding.id];
+        return `<article class="related-finding"><div><strong>${escapeHtml(finding.anomaly_type)}</strong><small>${escapeHtml(finding.asset_id)} · ${escapeHtml(finding.inspection_name)} · ${formatNumber(finding.temporal_proximity.absolute_days,1)} days from alert</small><small>${escapeHtml(finding.relationship_status.replaceAll('_',' '))} · ${escapeHtml(finding.relationship_basis)}</small>${association?`<small>Latest review: ${escapeHtml(association.reviewer)} — ${escapeHtml(association.explanation)} · ${association.history.length} audit event${association.history.length===1?'':'s'}</small>`:''}</div><div class="inline-actions"><button class="button small" onclick="openLightbox('${finding.thermal_image}','${escapeHtml(finding.asset_id)} thermal evidence')">Inspect evidence</button>${association ? `<span class="tag ${association.review_status==='Accepted'?'success':'warning'}">${escapeHtml(association.review_status)}</span>${association.review_status!=='Removed'?`<button class="button small" onclick="reviewEvidenceAssociation('${association.association_id}','Accepted','${selectedAlert.alert_id}')">Accept</button><button class="button small" onclick="reviewEvidenceAssociation('${association.association_id}','Rejected','${selectedAlert.alert_id}')">Reject</button><button class="button small" onclick="reviewEvidenceAssociation('${association.association_id}','Removed','${selectedAlert.alert_id}')">Remove</button>`:''}` : `<button class="button small primary" onclick="proposeEvidenceAssociation('${selectedAlert.alert_id}','${finding.id}')">Propose link</button>`}</div></article>`;
+      }).join('')}</div>` : '<div class="empty-indicators">No inspection findings are connected through the available topology.</div>'}
+      <div class="recommendation" style="margin-top:10px"><strong>Still needed to confirm a cause</strong><p>${escapeHtml((evidence?.missing_confirmation_information || []).join(' · '))}</p></div>` : '<div class="empty-indicators" style="margin-top:12px">Run or select an electrical alert to correlate inspection evidence.</div>'}
+  </div>`;
+}
+
+async function selectInverterAlert(alertId) {
   if (!state.inverterPanel) return;
   state.inverterPanel.selectedAlertId = alertId;
+  state.inverterPanel.evidenceLoading = true;
   renderOverlays();
+  try {
+    state.inverterPanel.evidence = await api(`/api/inverter-alerts/${encodeURIComponent(alertId)}/evidence`);
+  } catch (error) { showToast(error.message, "error"); }
+  state.inverterPanel.evidenceLoading = false;
+  renderOverlays();
+}
+
+async function proposeEvidenceAssociation(alertId, anomalyId) {
+  const explanation = prompt("Why should this visual finding be reviewed with the electrical alert?");
+  if (!explanation) return;
+  const reviewer = prompt("Reviewer name", "DeepDrishti operator");
+  if (!reviewer) return;
+  try {
+    await api(`/api/inverter-alerts/${encodeURIComponent(alertId)}/associations`, { method:"POST", body:{ anomaly_id:anomalyId, reviewer, explanation } });
+    await selectInverterAlert(alertId);
+    showToast("Evidence association proposed for human review", "success");
+  } catch (error) { showToast(error.message, "error"); }
+}
+
+async function reviewEvidenceAssociation(associationId, status, alertId) {
+  const explanation = prompt(`Reason for ${status.toLowerCase()} status`);
+  if (!explanation) return;
+  const reviewer = prompt("Reviewer name", "DeepDrishti operator");
+  if (!reviewer) return;
+  try {
+    await api(`/api/inverter-alert-associations/${encodeURIComponent(associationId)}`, { method:"PATCH", body:{ review_status:status, reviewer, explanation } });
+    await selectInverterAlert(alertId);
+    showToast(`Association ${status.toLowerCase()}`, "success");
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function updateInverterAlert(alertId, lifecycleStatus) {
@@ -728,6 +792,7 @@ function renderInverterDrawer() {
         </div></div>
         <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power',alerts)}</div>
         <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power',alerts)}</div>
+        ${renderTopologyEvidence(panel, selectedAlert)}
         ${renderExperimentalMl(panel)}
         <div class="detail-section"><div class="detail-section-title">Telemetry anomaly events</div>${alerts.length ? `<div class="inverter-alert-list">${alerts.map(alert=>`<button class="inverter-alert-card ${alert.alert_id===selectedAlert?.alert_id?'selected':''}" onclick="selectInverterAlert('${alert.alert_id}')"><i class="severity-bar ${className(alert.severity)}"></i><span><strong>${escapeHtml(alertLabel(alert.anomaly_category))}</strong><small>${escapeHtml(alert.severity)} · ${formatDate(alert.onset_timestamp || alert.start_timestamp)} · ${alert.active_duration_minutes ?? '—'} active min</small></span>${statusPill(alert.lifecycle_status)}</button>`).join('')}</div>` : `<div class="empty-indicators">No event-based alerts were detected for this period.</div>`}</div>
         ${selectedAlert ? `<div class="detail-section alert-evidence"><div class="detail-section-title">Selected telemetry evidence window</div><div class="chip-row">${priorityPill(selectedAlert.severity)}${statusPill(selectedAlert.lifecycle_status)}<span class="tag">${selectedAlert.active_duration_minutes ?? 0} active min</span><span class="tag">${selectedAlert.wall_clock_duration_minutes ?? selectedAlert.duration_minutes} wall-clock min</span><span class="tag">Unconfirmed cause</span></div><div class="alert-timestamp-grid"><span>Onset<strong>${escapeHtml(selectedAlert.onset_timestamp)}</strong></span><span>Detection eligible<strong>${escapeHtml(selectedAlert.detection_eligible_timestamp)}</strong></span><span>Last abnormal<strong>${escapeHtml(selectedAlert.last_abnormal_timestamp)}</strong></span><span>Recovery<strong>${escapeHtml(selectedAlert.recovery_timestamp || 'Not observed')}</strong></span></div>${inverterChart(evidenceReadings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual AC',color:'#9dff75'},{field:'dc_power_kw',label:'DC input',color:'#5be7d4'}],'Telemetry around the selected alert')}<div class="recommendation" style="margin-top:10px"><strong>Evidence-backed explanation</strong><p>${escapeHtml(selectedAlert.explanation)}</p></div><div class="recommendation" style="margin-top:8px"><strong>Investigation recommendation</strong><p>${escapeHtml(selectedAlert.recommended_investigation)}</p></div><div class="inline-actions alert-actions">${['Acknowledged','Investigating','Resolved'].map(status=>`<button class="button small ${selectedAlert.lifecycle_status===status?'primary':''}" onclick="updateInverterAlert('${selectedAlert.alert_id}','${status}')">${status}</button>`).join('')}</div><div class="timeline alert-history">${selectedAlert.lifecycle_history.map(item=>`<div class="timeline-item"><strong>${escapeHtml(item.status)}</strong><p>${escapeHtml(item.note)} · ${escapeHtml(item.actor)}</p><time>${formatDate(item.at)}</time></div>`).join('')}</div></div>`:''}
@@ -874,12 +939,13 @@ function renderAssets() {
   return `
     <div class="page-stack">
       <section class="page-header"><div><h2>One persistent record for every physical asset.</h2><p>Geometry, metadata, inspections, anomalies, tasks and evidence remain attached to the same equipment identity over time.</p></div><div class="page-actions"><button class="button" onclick="navigate('twin')">${icon("map")} Locate on map</button><button class="button primary" onclick="openAnomaly('${selected?.id || ''}')">${icon("eye")} Review active finding</button></div></section>
-      <section class="metric-strip"><div class="stat-card"><span>Modules</span><strong>${formatNumber(state.assets.hierarchy.modules)}</strong></div><div class="stat-card"><span>Strings</span><strong>${formatNumber(state.assets.hierarchy.strings)}</strong></div><div class="stat-card"><span>Rows</span><strong>${state.assets.hierarchy.rows}</strong></div><div class="stat-card"><span>Inverters</span><strong>${state.assets.hierarchy.inverters}</strong></div></section>
+      <div class="synthetic-notice strong">${icon("info")} ${escapeHtml(state.assets.topology_coverage.message)} Coverage: ${escapeHtml(state.assets.topology_coverage.status)} · ${escapeHtml(state.assets.topology_coverage.mapping_classification.replaceAll('_',' '))}.</div>
+      <section class="metric-strip"><div class="stat-card"><span>Mapped modules</span><strong>${knownCount(state.assets.hierarchy.modules)}</strong></div><div class="stat-card"><span>Mapped strings</span><strong>${knownCount(state.assets.hierarchy.strings)}</strong></div><div class="stat-card"><span>Mapped rows</span><strong>${knownCount(state.assets.hierarchy.rows)}</strong></div><div class="stat-card"><span>Registered inverters</span><strong>${knownCount(state.assets.hierarchy.inverters)}</strong></div></section>
       <section class="asset-layout">
-        <article class="panel asset-tree-panel"><header class="panel-header"><div><h3>Asset hierarchy</h3><p>Site → inverter → block → row → module</p></div></header><div class="asset-tree"><button class="tree-node active"><span class="tree-chevron">▾</span>${icon("panel")} ${escapeHtml(state.site.name)}</button><button class="tree-node depth-1"><span class="tree-chevron">▾</span>${icon("bolt")} Inverter 07</button><button class="tree-node depth-2"><span class="tree-chevron">▾</span>${icon("grid")} Block C1</button><button class="tree-node depth-3"><span class="tree-chevron">▾</span>${icon("list")} Row 17</button><button class="tree-node depth-3 active"><span class="tree-chevron">•</span>${icon("box")} Module 05</button>${state.assets.blocks.map(block=>`<button class="tree-node depth-1"><span class="tree-chevron">›</span>${icon("grid")} Block ${block.id} · ${block.findings} findings</button>`).join("")}</div></article>
+        <article class="panel asset-tree-panel"><header class="panel-header"><div><h3>Asset hierarchy</h3><p>Database-derived topology; unknown levels remain unknown</p></div></header><div class="asset-tree"><button class="tree-node active"><span class="tree-chevron">▾</span>${icon("panel")} ${escapeHtml(state.site.name)}</button>${state.assets.blocks.map(block=>`<button class="tree-node depth-1"><span class="tree-chevron">›</span>${icon("grid")} Block ${escapeHtml(block.id)} · ${block.findings} findings · ${block.strings == null?'strings unknown':`${block.strings} strings`}</button>`).join("") || '<div class="empty-indicators">No topology is available for this site.</div>'}</div></article>
         <div class="page-stack">
-          <article class="panel"><header class="panel-header"><div><h3>${escapeHtml(selected?.asset_id || 'SRP-C1-R17-M05')}</h3><p>Equipment-level Digital Twin record</p></div><div class="chip-row">${selected?priorityPill(selected.priority):''}${selected?statusPill(selected.status):''}</div></header><div class="panel-body"><div class="asset-visual"><div class="asset-module">${cells}</div></div><div class="detail-metrics" style="margin-top:14px"><div class="detail-metric"><span>Manufacturer</span><strong style="font-size:12px">Demo PV Systems</strong></div><div class="detail-metric"><span>Model</span><strong style="font-size:12px">DD-MONO-550</strong></div><div class="detail-metric"><span>Nameplate</span><strong>550 W</strong></div><div class="detail-metric"><span>Installed</span><strong style="font-size:12px">14 Mar 2022</strong></div><div class="detail-metric"><span>Serial</span><strong class="mono" style="font-size:11px">DDSR2203140815</strong></div><div class="detail-metric"><span>Linked inverter</span><strong style="font-size:12px">INV-07</strong></div></div></div></article>
-          <article class="panel"><header class="panel-header"><div><h3>Lifecycle history</h3><p>The operational value of the Digital Twin grows with every inspection and repair</p></div>${icon("history")}</header><div class="panel-body timeline">${(selected?.history || []).map(event=>`<div class="timeline-item"><strong>${escapeHtml(event.event)}</strong><p>${escapeHtml(event.actor)}</p><time>${formatDate(event.at)}</time></div>`).join("")}<div class="timeline-item"><strong>Module commissioned</strong><p>Imported from as-built asset register</p><time>14 Mar 2022</time></div></div></article>
+          <article class="panel"><header class="panel-header"><div><h3>${escapeHtml(selected?.asset_id || 'No selected physical asset')}</h3><p>Synthetic equipment-level Digital Twin record</p></div><div class="chip-row">${selected?priorityPill(selected.priority):''}${selected?statusPill(selected.status):''}</div></header><div class="panel-body"><div class="asset-visual"><div class="asset-module">${cells}</div></div><div class="detail-metrics" style="margin-top:14px"><div class="detail-metric"><span>Registry provenance</span><strong style="font-size:12px">Synthetic demo</strong></div><div class="detail-metric"><span>Block</span><strong>${escapeHtml(selected?.block_name || 'Unknown')}</strong></div><div class="detail-metric"><span>Row</span><strong>${selected?.row_no ?? 'Unknown'}</strong></div><div class="detail-metric"><span>Module position</span><strong>${selected?.module_no ?? 'Unknown'}</strong></div><div class="detail-metric"><span>Electrical mapping</span><strong style="font-size:12px">Review inverter topology</strong></div><div class="detail-metric"><span>As-built verified</span><strong>No</strong></div></div></div></article>
+          <article class="panel"><header class="panel-header"><div><h3>Lifecycle history</h3><p>The operational value of the Digital Twin grows with every inspection and repair</p></div>${icon("history")}</header><div class="panel-body timeline">${(selected?.history || []).map(event=>`<div class="timeline-item"><strong>${escapeHtml(event.event)}</strong><p>${escapeHtml(event.actor)}</p><time>${formatDate(event.at)}</time></div>`).join("") || '<div class="empty-indicators">No asset history is available.</div>'}</div></article>
         </div>
       </section>
     </div>`;

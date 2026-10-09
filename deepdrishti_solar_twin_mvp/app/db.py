@@ -170,12 +170,133 @@ def init_db(reset: bool = False) -> None:
                 provenance TEXT NOT NULL DEFAULT 'synthetic_ground_truth'
             );
 
+            CREATE TABLE IF NOT EXISTS site_blocks (
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                block_code TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                expected_row_count INTEGER CHECK(expected_row_count > 0),
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                coverage_status TEXT NOT NULL CHECK(coverage_status IN ('complete','partial','unknown')),
+                provenance TEXT NOT NULL,
+                PRIMARY KEY(site_id, block_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS inverter_mppts (
+                mppt_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE CASCADE,
+                input_index INTEGER NOT NULL CHECK(input_index > 0),
+                label TEXT NOT NULL,
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                provenance TEXT NOT NULL,
+                UNIQUE(inverter_id, input_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS pv_strings (
+                string_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                mppt_id TEXT NOT NULL REFERENCES inverter_mppts(mppt_id) ON DELETE CASCADE,
+                string_index INTEGER NOT NULL CHECK(string_index > 0),
+                label TEXT NOT NULL,
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                provenance TEXT NOT NULL,
+                UNIQUE(mppt_id, string_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS physical_asset_groups (
+                asset_group_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL,
+                block_code TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                start_ordinal INTEGER NOT NULL CHECK(start_ordinal > 0),
+                end_ordinal INTEGER NOT NULL CHECK(end_ordinal >= start_ordinal),
+                row_start INTEGER NOT NULL CHECK(row_start > 0),
+                row_end INTEGER NOT NULL CHECK(row_end >= row_start),
+                module_start INTEGER NOT NULL CHECK(module_start > 0),
+                module_end INTEGER NOT NULL CHECK(module_end > 0),
+                mapped_module_count INTEGER NOT NULL CHECK(mapped_module_count > 0),
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                provenance TEXT NOT NULL,
+                FOREIGN KEY(site_id, block_code) REFERENCES site_blocks(site_id, block_code) ON DELETE CASCADE,
+                UNIQUE(site_id, block_code, start_ordinal, end_ordinal)
+            );
+
+            CREATE TABLE IF NOT EXISTS string_asset_groups (
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                string_id TEXT NOT NULL REFERENCES pv_strings(string_id) ON DELETE CASCADE,
+                asset_group_id TEXT NOT NULL REFERENCES physical_asset_groups(asset_group_id) ON DELETE CASCADE,
+                relationship_type TEXT NOT NULL DEFAULT 'feeds',
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                provenance TEXT NOT NULL,
+                PRIMARY KEY(string_id, asset_group_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS alert_finding_associations (
+                association_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                alert_id TEXT NOT NULL REFERENCES inverter_alerts(alert_id) ON DELETE CASCADE,
+                anomaly_id TEXT NOT NULL REFERENCES anomalies(id) ON DELETE CASCADE,
+                review_status TEXT NOT NULL CHECK(review_status IN ('Proposed','Accepted','Rejected','Removed')),
+                reviewer TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(alert_id, anomaly_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS alert_finding_association_events (
+                event_id TEXT PRIMARY KEY,
+                association_id TEXT NOT NULL REFERENCES alert_finding_associations(association_id) ON DELETE CASCADE,
+                review_status TEXT NOT NULL CHECK(review_status IN ('Proposed','Accepted','Rejected','Removed')),
+                reviewer TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inverters_site ON inverters(site_id);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_timestamp ON inverter_telemetry(timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_state ON inverter_telemetry(inverter_id, operating_state, timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_alerts_site ON inverter_alerts(site_id, start_timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_alerts_inverter ON inverter_alerts(inverter_id, lifecycle_status, start_timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_alerts_category ON inverter_alerts(anomaly_category, severity, lifecycle_status);
+            CREATE INDEX IF NOT EXISTS idx_site_blocks_site ON site_blocks(site_id, block_code);
+            CREATE INDEX IF NOT EXISTS idx_mppts_site_inverter ON inverter_mppts(site_id, inverter_id, input_index);
+            CREATE INDEX IF NOT EXISTS idx_strings_site_mppt ON pv_strings(site_id, mppt_id, string_index);
+            CREATE INDEX IF NOT EXISTS idx_asset_groups_site_block ON physical_asset_groups(site_id, block_code, start_ordinal, end_ordinal);
+            CREATE INDEX IF NOT EXISTS idx_string_groups_site ON string_asset_groups(site_id, string_id, asset_group_id);
+            CREATE INDEX IF NOT EXISTS idx_associations_alert ON alert_finding_associations(alert_id, review_status);
+            CREATE INDEX IF NOT EXISTS idx_associations_anomaly ON alert_finding_associations(anomaly_id, review_status);
+            CREATE INDEX IF NOT EXISTS idx_association_events_association ON alert_finding_association_events(association_id, recorded_at);
+
+            CREATE TRIGGER IF NOT EXISTS trg_mppt_site_insert
+            BEFORE INSERT ON inverter_mppts
+            WHEN (SELECT site_id FROM inverters WHERE inverter_id=NEW.inverter_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'inverter and MPPT site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_mppt_site_update
+            BEFORE UPDATE OF site_id, inverter_id ON inverter_mppts
+            WHEN (SELECT site_id FROM inverters WHERE inverter_id=NEW.inverter_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'inverter and MPPT site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_string_site_insert
+            BEFORE INSERT ON pv_strings
+            WHEN (SELECT site_id FROM inverter_mppts WHERE mppt_id=NEW.mppt_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'MPPT and string site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_string_group_site_insert
+            BEFORE INSERT ON string_asset_groups
+            WHEN (SELECT site_id FROM pv_strings WHERE string_id=NEW.string_id) != NEW.site_id
+              OR (SELECT site_id FROM physical_asset_groups WHERE asset_group_id=NEW.asset_group_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'string and asset group site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_association_site_insert
+            BEFORE INSERT ON alert_finding_associations
+            WHEN (SELECT site_id FROM inverter_alerts WHERE alert_id=NEW.alert_id) != NEW.site_id
+              OR (SELECT site_id FROM anomalies WHERE id=NEW.anomaly_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'alert and finding site mismatch'); END;
             """
         )
         migrate_inverter_alerts(conn)
@@ -185,6 +306,7 @@ def init_db(reset: bool = False) -> None:
         if conn.execute("SELECT 1 FROM sites WHERE id = 'site-001'").fetchone():
             seed_demo_inverters(conn)
             seed_phase2_scenarios(conn)
+            seed_demo_topology(conn)
 
 
 def migrate_inverter_alerts(conn: sqlite3.Connection) -> None:
@@ -289,6 +411,85 @@ def seed_demo_inverters(conn: sqlite3.Connection) -> None:
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         telemetry,
     )
+    conn.commit()
+
+
+def seed_demo_topology(conn: sqlite3.Connection) -> None:
+    """Install a deterministic simulated electrical-to-physical topology.
+
+    The records describe only the rendered demo layout. They are intentionally
+    classified as synthetic and are not customer as-built documentation.
+    """
+    provenance = "phase3a_deterministic_demo_topology_v1"
+    for block_code in ("B1", "B2", "C1", "C2"):
+        conn.execute(
+            """INSERT OR IGNORE INTO site_blocks
+               (site_id, block_code, display_name, expected_row_count,
+                mapping_classification, coverage_status, provenance)
+               VALUES ('site-001', ?, ?, 18, 'synthetic_demo', 'complete', ?)""",
+            (block_code, f"Demo block {block_code}", provenance),
+        )
+
+    blocks = ("B1", "B1", "B1", "B2", "B2", "B2", "C1", "C1", "C1", "C2", "C2", "C2")
+    mppt_pattern = (6, 7, 8)
+    string_pattern = (12, 14, 16)
+    for inverter_number, block_code in enumerate(blocks, start=1):
+        inverter_id = f"site-001-INV-{inverter_number:02d}"
+        position = (inverter_number - 1) % 3
+        mppt_count = mppt_pattern[position]
+        string_count = string_pattern[position]
+        for input_index in range(1, mppt_count + 1):
+            mppt_id = f"{inverter_id}-MPPT-{input_index:02d}"
+            conn.execute(
+                """INSERT OR IGNORE INTO inverter_mppts
+                   (mppt_id, site_id, inverter_id, input_index, label,
+                    mapping_classification, provenance)
+                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?)""",
+                (mppt_id, inverter_id, input_index, f"MPPT {input_index:02d}", provenance),
+            )
+
+        # Each inverter covers six rendered rows (192 module positions). String
+        # counts deliberately vary; integer boundaries partition the positions
+        # without overlaps or invented customer serial-number relationships.
+        inverter_start = position * 192 + 1
+        for string_number in range(1, string_count + 1):
+            mppt_index = (string_number - 1) % mppt_count + 1
+            mppt_id = f"{inverter_id}-MPPT-{mppt_index:02d}"
+            local_string_index = (string_number - 1) // mppt_count + 1
+            string_id = f"{inverter_id}-STR-{string_number:02d}"
+            conn.execute(
+                """INSERT OR IGNORE INTO pv_strings
+                   (string_id, site_id, mppt_id, string_index, label,
+                    mapping_classification, provenance)
+                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?)""",
+                (string_id, mppt_id, local_string_index, f"String {string_number:02d}", provenance),
+            )
+            start_ordinal = inverter_start + ((string_number - 1) * 192 // string_count)
+            end_ordinal = inverter_start + (string_number * 192 // string_count) - 1
+            row_start = (start_ordinal - 1) // 32 + 1
+            row_end = (end_ordinal - 1) // 32 + 1
+            module_start = (start_ordinal - 1) % 32 + 1
+            module_end = (end_ordinal - 1) % 32 + 1
+            group_id = f"site-001-{block_code}-GRP-{inverter_number:02d}-{string_number:02d}"
+            conn.execute(
+                """INSERT OR IGNORE INTO physical_asset_groups
+                   (asset_group_id, site_id, block_code, display_name, start_ordinal,
+                    end_ordinal, row_start, row_end, module_start, module_end,
+                    mapped_module_count, mapping_classification, provenance)
+                   VALUES (?, 'site-001', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synthetic_demo', ?)""",
+                (
+                    group_id, block_code, f"{block_code} positions {start_ordinal}-{end_ordinal}",
+                    start_ordinal, end_ordinal, row_start, row_end, module_start, module_end,
+                    end_ordinal - start_ordinal + 1, provenance,
+                ),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO string_asset_groups
+                   (site_id, string_id, asset_group_id, relationship_type,
+                    mapping_classification, provenance)
+                   VALUES ('site-001', ?, ?, 'feeds', 'synthetic_demo', ?)""",
+                (string_id, group_id, provenance),
+            )
     conn.commit()
 
 

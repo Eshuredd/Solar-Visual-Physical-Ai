@@ -1769,6 +1769,21 @@ img {
   padding: 14px;
   background: linear-gradient(145deg, rgba(200, 156, 255, .07), rgba(8, 23, 17, .3));
 }
+.inverter-pad.selectable { cursor: pointer; transition: fill .18s, stroke .18s; }
+.inverter-pad.selectable:hover,
+.inverter-pad.selectable.selected { fill: #c8ff72; stroke: #fff; stroke-width: 2px; }
+.electrical-block-highlight .solar-row { stroke: rgba(200, 255, 114, .85); stroke-width: 1.6px; }
+.topology-section { border: 1px solid rgba(91, 231, 212, .25); border-radius: 14px; padding: 14px; }
+.topology-metrics { margin: 12px 0; }
+.topology-tree { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.topology-tree details { border: 1px solid var(--line); border-radius: 9px; background: rgba(3, 15, 11, .38); }
+.topology-tree summary { cursor: pointer; padding: 9px 11px; font-size: 11px; font-weight: 700; display: flex; justify-content: space-between; }
+.topology-tree summary span { color: var(--muted); font-weight: 500; }
+.topology-string { display: flex; justify-content: space-between; gap: 12px; padding: 7px 11px; border-top: 1px solid var(--line); font-size: 9px; }
+.topology-string span { color: var(--muted); text-align: right; }
+.related-findings { display: grid; gap: 8px; }
+.related-finding { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
+.related-finding small { display: block; color: var(--muted); margin-top: 3px; font-size: 9px; }
 
 .inverter-loading { display: grid; gap: 14px; }
 .inverter-loading .skeleton { height: 150px; border-radius: 14px; }

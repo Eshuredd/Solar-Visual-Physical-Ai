@@ -44,6 +44,8 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Causal alert timestamps, recovery-aware grouping and active-versus-wall-clock duration
 - Independent seeded hold-out evaluation and complete telemetry-outage handling
 - Experimental leakage-controlled statistical and Isolation Forest review candidates, kept separate from operational alerts
+- Site-scoped inverter → MPPT → string → physical-group topology with explicit provenance and coverage
+- Read-only electrical/inspection evidence correlation and audited human association review
 
 ### Runnable image-analysis demonstration
 
@@ -170,10 +172,14 @@ The API never trains a model. It loads the trusted local artifact when present a
 | GET | `/api/inverters/{inverter_id}` | Inverter metadata and current monitoring summary |
 | GET | `/api/inverters/{inverter_id}/telemetry` | Time-range telemetry with modeled expected power |
 | GET | `/api/inverters/{inverter_id}/summary` | Time-range energy, yield, efficiency and indicators |
+| GET | `/api/inverters/{inverter_id}/topology` | Connected MPPT, string and physical demo hierarchy |
 | POST | `/api/inverters/{inverter_id}/analyze` | Run idempotent event detection over a time range |
 | GET | `/api/inverters/{inverter_id}/alerts` | Filterable inverter alert history |
 | GET | `/api/sites/{site_id}/inverter-alerts` | Filterable site inverter alerts |
 | GET | `/api/inverter-alerts/{alert_id}` | Alert evidence and lifecycle history |
+| GET | `/api/inverter-alerts/{alert_id}/evidence` | Correlated electrical and inspection evidence |
+| POST | `/api/inverter-alerts/{alert_id}/associations` | Propose a reviewed visual/electrical association |
+| PATCH | `/api/inverter-alert-associations/{association_id}` | Accept, reject or remove an association |
 | PATCH | `/api/inverter-alerts/{alert_id}` | Acknowledge, investigate or resolve an alert |
 | GET | `/api/inverter-alerts/evaluation` | Reproducible synthetic-only evaluation |
 | GET | `/api/ml/model` | Experimental artifact provenance and enabled state |
@@ -247,6 +253,7 @@ The MVP is intentionally self-contained. A production system should replace or e
 - Single-user demo → organizations, roles, portfolio tenancy and SSO
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PRODUCT_BACKLOG.md](docs/PRODUCT_BACKLOG.md) for the recommended evolution path.
+The Phase 3A schema and its simulated-versus-verified boundary are documented in [docs/PHASE3A_TOPOLOGY.md](docs/PHASE3A_TOPOLOGY.md).
 
 ## Resetting the application
 

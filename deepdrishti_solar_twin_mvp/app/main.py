@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .asset_topology import association_records, correlated_findings, inverter_topology, site_topology_summary
 from .db import DB_PATH, connect, init_db, rows_to_dicts
 from .inverter_anomaly import CATEGORIES, METHOD_VERSION, detect_anomaly_events, evaluate_synthetic_events
 from .inverter_evaluation import generate_held_out_cases
@@ -87,6 +88,18 @@ class InverterAlertPatch(BaseModel):
     lifecycle_status: Literal["Open", "Acknowledged", "Investigating", "Resolved"]
     note: str = Field(default="", max_length=2000)
     actor: str = Field(default="DeepDrishti operator", min_length=2, max_length=120)
+
+
+class AlertFindingAssociationCreate(BaseModel):
+    anomaly_id: str
+    reviewer: str = Field(min_length=2, max_length=120)
+    explanation: str = Field(min_length=5, max_length=3000)
+
+
+class AlertFindingAssociationPatch(BaseModel):
+    review_status: Literal["Accepted", "Rejected", "Removed"]
+    reviewer: str = Field(min_length=2, max_length=120)
+    explanation: str = Field(min_length=5, max_length=3000)
 
 
 def get_site_or_404(site_id: str) -> dict[str, Any]:
@@ -315,6 +328,13 @@ def list_site_inverters(site_id: str, start: str | None = None, end: str | None 
 def inverter_detail(inverter_id: str) -> dict[str, Any]:
     inverter = get_inverter_or_404(inverter_id)
     return {**inverter, "summary": _inverter_summary_payload(inverter)}
+
+
+@app.get("/api/inverters/{inverter_id}/topology")
+def inverter_topology_detail(inverter_id: str) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    with connect() as conn:
+        return inverter_topology(conn, inverter)
 
 
 @app.get("/api/inverters/{inverter_id}/telemetry")
@@ -631,6 +651,112 @@ def inverter_alert_detail(alert_id: str) -> dict[str, Any]:
     return _decode_alert(dict(row))
 
 
+@app.get("/api/inverter-alerts/{alert_id}/evidence")
+def inverter_alert_evidence(alert_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM inverter_alerts WHERE alert_id=?", (alert_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Inverter alert not found")
+        alert = _decode_alert(dict(row))
+        inverter_row = conn.execute("SELECT * FROM inverters WHERE inverter_id=?", (alert["inverter_id"],)).fetchone()
+        topology = inverter_topology(conn, dict(inverter_row))
+        findings = correlated_findings(conn, alert) if topology["available"] else []
+        associations = association_records(conn, alert_id)
+    missing = ["MPPT-level and string-level electrical telemetry", "field inspection or IV-curve confirmation"]
+    if not topology.get("is_verified_as_built"):
+        missing.insert(0, "verified customer as-built inverter-to-string-to-module mapping")
+    if not findings:
+        missing.append("inspection finding on a connected mapped asset")
+    return {
+        "alert": alert,
+        "topology": topology,
+        "connected_equipment": {
+            "inverter_id": alert["inverter_id"], "blocks": topology.get("blocks", []),
+            "mppt_count": topology.get("mppt_count"), "string_count": topology.get("string_count"),
+            "mapped_module_count": topology.get("mapped_module_count"),
+        },
+        "electrical_evidence": {
+            "expected_measurements": alert["expected_measurements"],
+            "observed_measurements": alert["observed_measurements"],
+            "telemetry_references": alert["contributing_telemetry_refs"],
+            "detection_method": alert["detection_method"], "diagnosis_status": "unconfirmed",
+        },
+        "related_visual_findings": findings,
+        "reviewed_associations": associations,
+        "missing_confirmation_information": missing,
+        "correlation_notice": "Topology and temporal proximity identify evidence for review; neither proves a shared electrical root cause.",
+        "operational_detector": METHOD_VERSION,
+        "experimental_ml_used_for_correlation": False,
+    }
+
+
+@app.post("/api/inverter-alerts/{alert_id}/associations")
+def create_alert_finding_association(alert_id: str, payload: AlertFindingAssociationCreate) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with connect() as conn:
+        alert = conn.execute("SELECT alert_id,site_id FROM inverter_alerts WHERE alert_id=?", (alert_id,)).fetchone()
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Inverter alert not found")
+        finding = conn.execute("SELECT id,site_id FROM anomalies WHERE id=?", (payload.anomaly_id,)).fetchone()
+        if finding is None:
+            raise HTTPException(status_code=404, detail="Visual finding not found")
+        if alert["site_id"] != finding["site_id"]:
+            raise HTTPException(status_code=400, detail="Alert and visual finding must belong to the same site")
+        existing = conn.execute(
+            "SELECT association_id,review_status FROM alert_finding_associations WHERE alert_id=? AND anomaly_id=?",
+            (alert_id, payload.anomaly_id),
+        ).fetchone()
+        if existing and existing["review_status"] not in {"Rejected", "Removed"}:
+            raise HTTPException(status_code=409, detail="An active association already exists")
+        association_id = existing["association_id"] if existing else f"assoc-{uuid.uuid4().hex[:12]}"
+        if existing:
+            conn.execute(
+                """UPDATE alert_finding_associations SET review_status='Proposed',reviewer=?,explanation=?,
+                     provenance='operator_review',updated_at=? WHERE association_id=?""",
+                (payload.reviewer, payload.explanation, now, association_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO alert_finding_associations
+                   (association_id,site_id,alert_id,anomaly_id,review_status,reviewer,explanation,
+                    provenance,created_at,updated_at)
+                   VALUES (?,?,?,?,'Proposed',?,?,'operator_review',?,?)""",
+                (association_id, alert["site_id"], alert_id, payload.anomaly_id, payload.reviewer, payload.explanation, now, now),
+            )
+        conn.execute(
+            """INSERT INTO alert_finding_association_events
+               (event_id,association_id,review_status,reviewer,explanation,provenance,recorded_at)
+               VALUES (?,?,'Proposed',?,?,'operator_review',?)""",
+            (f"assoc-event-{uuid.uuid4().hex[:12]}", association_id, payload.reviewer, payload.explanation, now),
+        )
+        conn.commit()
+        return next(item for item in association_records(conn, alert_id) if item["association_id"] == association_id)
+
+
+@app.patch("/api/inverter-alert-associations/{association_id}")
+def update_alert_finding_association(association_id: str, patch: AlertFindingAssociationPatch) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM alert_finding_associations WHERE association_id=?", (association_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Association not found")
+        if row["review_status"] == "Removed":
+            raise HTTPException(status_code=409, detail="Removed associations must be proposed again before review")
+        conn.execute(
+            """UPDATE alert_finding_associations SET review_status=?,reviewer=?,explanation=?,updated_at=?
+               WHERE association_id=?""",
+            (patch.review_status, patch.reviewer, patch.explanation, now, association_id),
+        )
+        conn.execute(
+            """INSERT INTO alert_finding_association_events
+               (event_id,association_id,review_status,reviewer,explanation,provenance,recorded_at)
+               VALUES (?,?,?,?,?,'operator_review',?)""",
+            (f"assoc-event-{uuid.uuid4().hex[:12]}", association_id, patch.review_status, patch.reviewer, patch.explanation, now),
+        )
+        conn.commit()
+        return next(item for item in association_records(conn, row["alert_id"]) if item["association_id"] == association_id)
+
+
 @app.patch("/api/inverter-alerts/{alert_id}")
 def update_inverter_alert(alert_id: str, patch: InverterAlertPatch) -> dict[str, Any]:
     with connect() as conn:
@@ -926,30 +1052,28 @@ def update_task(task_id: str, patch: TaskPatch) -> dict[str, Any]:
 def assets(site_id: str) -> dict[str, Any]:
     site = get_site_or_404(site_id)
     with connect() as conn:
-        blocks = rows_to_dicts(
-            conn.execute(
-                """
-                SELECT block_name AS id,
-                       COUNT(DISTINCT row_no) AS rows,
-                       COUNT(*) AS findings,
-                       ROUND(SUM(affected_kw),2) AS affected_kw
-                FROM anomalies WHERE site_id = ?
-                GROUP BY block_name ORDER BY block_name
-                """,
-                (site_id,),
-            )
-        )
+        topology = site_topology_summary(conn, site_id)
+        finding_counts = {
+            row["id"]: row for row in rows_to_dicts(conn.execute(
+                """SELECT block_name AS id,COUNT(*) AS findings,ROUND(SUM(affected_kw),2) AS affected_kw
+                   FROM anomalies WHERE site_id=? GROUP BY block_name""", (site_id,)
+            ))
+        }
+        if topology["blocks"]:
+            blocks = [
+                {**block, **finding_counts.get(block["id"], {"findings": 0, "affected_kw": 0.0})}
+                for block in topology["blocks"]
+            ]
+        else:
+            blocks = [
+                {**block, "rows": None, "mapping_classification": "unknown", "coverage_status": "unavailable"}
+                for block in finding_counts.values()
+            ]
     return {
         "site": site,
         "blocks": blocks,
-        "hierarchy": {
-            "site": site["name"],
-            "inverters": 12,
-            "blocks": 4,
-            "rows": 72,
-            "strings": 864,
-            "modules": 149760,
-        },
+        "hierarchy": {**topology["hierarchy"], "site": site["name"]},
+        "topology_coverage": topology["coverage"],
     }
 
 
