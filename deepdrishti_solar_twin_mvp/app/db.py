@@ -178,12 +178,42 @@ def init_db(reset: bool = False) -> None:
             CREATE INDEX IF NOT EXISTS idx_inverter_alerts_category ON inverter_alerts(anomaly_category, severity, lifecycle_status);
             """
         )
+        migrate_inverter_alerts(conn)
         count = conn.execute("SELECT COUNT(*) AS c FROM sites").fetchone()["c"]
         if count == 0:
             seed_database(conn)
         if conn.execute("SELECT 1 FROM sites WHERE id = 'site-001'").fetchone():
             seed_demo_inverters(conn)
             seed_phase2_scenarios(conn)
+
+
+def migrate_inverter_alerts(conn: sqlite3.Connection) -> None:
+    """Add Phase 2A.1 event semantics without rebuilding or deleting alert data."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(inverter_alerts)")}
+    additions = {
+        "onset_timestamp": "TEXT",
+        "detection_eligible_timestamp": "TEXT",
+        "last_abnormal_timestamp": "TEXT",
+        "recovery_timestamp": "TEXT",
+        "active_duration_minutes": "INTEGER",
+        "excluded_duration_minutes": "INTEGER",
+        "acknowledgment_timestamp": "TEXT",
+    }
+    for name, sql_type in additions.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE inverter_alerts ADD COLUMN {name} {sql_type}")
+    conn.execute(
+        """UPDATE inverter_alerts SET
+             onset_timestamp=COALESCE(onset_timestamp,start_timestamp),
+             detection_eligible_timestamp=COALESCE(detection_eligible_timestamp,start_timestamp),
+             last_abnormal_timestamp=COALESCE(last_abnormal_timestamp,end_timestamp),
+             active_duration_minutes=COALESCE(active_duration_minutes,
+               CAST((julianday(end_timestamp)-julianday(start_timestamp))*1440 AS INTEGER)+15),
+             excluded_duration_minutes=COALESCE(excluded_duration_minutes,0)
+           WHERE onset_timestamp IS NULL OR detection_eligible_timestamp IS NULL
+              OR last_abnormal_timestamp IS NULL OR active_duration_minutes IS NULL"""
+    )
+    conn.commit()
 
 
 def seed_demo_inverters(conn: sqlite3.Connection) -> None:

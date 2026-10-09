@@ -1837,6 +1837,14 @@ img {
 .inverter-alert-card small { display: block; margin-top: 5px; color: var(--muted); font-size: 8px; }
 .alert-evidence { padding: 13px; border: 1px solid var(--line-strong); border-radius: 13px; background: rgba(255,255,255,.015); }
 .alert-time { margin: 10px 0; font-family: var(--mono); font-size: 9px; }
+.alert-timestamp-grid {
+  margin: 10px 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.alert-timestamp-grid span { padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--faint); font-size: 8px; text-transform: uppercase; }
+.alert-timestamp-grid strong { display: block; margin-top: 5px; color: var(--text-2); font-family: var(--mono); font-size: 8px; text-transform: none; overflow-wrap: anywhere; }
 .alert-actions { margin-top: 12px; }
 .alert-history { margin-top: 16px; }
 

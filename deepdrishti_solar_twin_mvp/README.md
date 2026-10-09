@@ -41,6 +41,8 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Interactive inverter detail panel with historical and expected-versus-actual charts
 - Explainable event-based inverter alerts with evidence windows and auditable lifecycle history
 - Reproducible synthetic scenario evaluation, clearly separated from real-world accuracy claims
+- Causal alert timestamps, recovery-aware grouping and active-versus-wall-clock duration
+- Independent seeded hold-out evaluation and complete telemetry-outage handling
 
 ### Runnable image-analysis demonstration
 

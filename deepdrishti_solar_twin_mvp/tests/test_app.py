@@ -21,6 +21,7 @@ from app.inverter_monitoring import (  # noqa: E402
     relative_yield_pct,
     validate_telemetry,
 )
+from app.inverter_anomaly import detect_anomaly_events, evaluate_synthetic_events  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -348,3 +349,120 @@ def test_synthetic_event_evaluation_is_reproducible_and_explicitly_limited() -> 
         assert first["duplicate_alert_count"] == 0
         assert first["normal_operation_passed"] is True
         assert "synthetic" in first["limitations"].lower()
+
+
+def test_causal_detection_timestamps_and_active_duration() -> None:
+    with make_client() as client:
+        result = client.post("/api/inverters/site-001-INV-03/analyze").json()
+        alert = client.get(f"/api/inverter-alerts/{result['alert_ids'][0]}").json()
+        assert alert["onset_timestamp"] == "2026-08-08T10:00:00Z"
+        assert alert["detection_eligible_timestamp"] == "2026-08-08T10:45:00Z"
+        assert alert["last_abnormal_timestamp"] == "2026-08-08T14:00:00Z"
+        assert alert["recovery_timestamp"] == "2026-08-08T14:15:00Z"
+        assert alert["active_duration_minutes"] == 17 * 15
+        assert alert["alert_creation_timestamp"] == alert["created_at"]
+
+
+def test_overnight_exclusions_do_not_inflate_active_duration() -> None:
+    with make_client() as client:
+        result = client.post("/api/inverters/site-001-INV-07/analyze").json()
+        alert = client.get(f"/api/inverter-alerts/{result['alert_ids'][0]}").json()
+        assert alert["active_duration_minutes"] < alert["wall_clock_duration_minutes"]
+        assert alert["excluded_duration_minutes"] > 0
+        assert alert["recovery_timestamp"] is None
+
+
+def test_verified_recovery_splits_pv_incidents() -> None:
+    init_db(reset=True)
+    with connect() as conn:
+        inverter = dict(conn.execute("SELECT * FROM inverters WHERE inverter_id='site-001-INV-01'").fetchone())
+        readings = [dict(row) for row in conn.execute(
+            """SELECT * FROM inverter_telemetry WHERE inverter_id='site-001-INV-01'
+               AND timestamp BETWEEN '2026-08-07T09:00:00Z' AND '2026-08-07T14:00:00Z' ORDER BY timestamp"""
+        )]
+    for row in readings:
+        if "T09:00" <= row["timestamp"][10:16] <= "T10:30" or "T12:00" <= row["timestamp"][10:16] <= "T13:30":
+            row["dc_power_kw"] *= .6
+            row["dc_current_a"] *= .6
+            row["ac_power_kw"] *= .6
+            row["ac_current_a"] *= .6
+    events = [item for item in detect_anomaly_events(inverter, readings) if item["anomaly_category"] == "pv_side_underperformance"]
+    assert len(events) == 2
+    assert events[0]["recovery_timestamp"] == "2026-08-07T10:45:00Z"
+
+
+def test_complete_outage_requires_prior_history() -> None:
+    with make_client() as client:
+        outage = client.post(
+            "/api/inverters/site-001-INV-01/analyze?start=2026-08-14T00:00:00Z&end=2026-08-14T06:00:00Z"
+        ).json()
+        alert = client.get(f"/api/inverter-alerts/{outage['alert_ids'][0]}").json()
+        assert alert["anomaly_subtype"] == "complete_outage"
+        assert alert["active_duration_minutes"] == 0
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO sites VALUES ('site-new','New Site','Test',1,'Healthy','2026-01-01',0,0,100,'Owner','2026-01-01')"""
+            )
+            conn.execute(
+                """INSERT INTO inverters VALUES ('site-new-INV-01','site-new','INV-01',1000,'Test','New','Operational','N1','synthetic_demo')"""
+            )
+            conn.commit()
+        new_device = client.post(
+            "/api/inverters/site-new-INV-01/analyze?start=2026-08-14T00:00:00Z&end=2026-08-14T06:00:00Z"
+        ).json()
+        assert new_device["events_detected"] == 0
+
+
+def test_one_to_one_matching_and_unestimable_metrics() -> None:
+    prediction = {
+        "inverter_id": "inv", "anomaly_category": "pv_side_underperformance",
+        "start_timestamp": "2026-01-01T10:00:00Z", "end_timestamp": "2026-01-01T12:00:00Z",
+        "onset_timestamp": "2026-01-01T10:00:00Z", "detection_eligible_timestamp": "2026-01-01T10:45:00Z",
+        "last_abnormal_timestamp": "2026-01-01T12:00:00Z",
+    }
+    truths = [
+        {"scenario_id": f"s{i}", "inverter_id": "inv", "scenario_type": "pv", "expected_alert_category": "pv_side_underperformance", "start_timestamp": start, "end_timestamp": end}
+        for i, (start, end) in enumerate([
+            ("2026-01-01T10:00:00Z", "2026-01-01T10:45:00Z"),
+            ("2026-01-01T11:00:00Z", "2026-01-01T12:00:00Z"),
+        ])
+    ]
+    result = evaluate_synthetic_events([prediction], truths)
+    assert result["true_positive_events"] == 1
+    assert result["false_negative_events"] == 1
+    assert result["event_level_recall"] == .5
+    empty = evaluate_synthetic_events([], [])
+    assert empty["event_level_precision"] is None
+    assert empty["event_level_recall"] is None
+    assert empty["event_level_f1"] is None
+
+
+def test_sliding_window_dedup_preserves_lifecycle_and_acknowledgement() -> None:
+    with make_client() as client:
+        first = client.post("/api/inverters/site-001-INV-03/analyze").json()
+        alert_id = first["alert_ids"][0]
+        acknowledged = client.patch(
+            f"/api/inverter-alerts/{alert_id}", json={"lifecycle_status": "Acknowledged", "note": "Reviewed."}
+        ).json()
+        assert acknowledged["acknowledgment_timestamp"] is not None
+        overlap = client.post(
+            "/api/inverters/site-001-INV-03/analyze?start=2026-08-08T10:30:00Z&end=2026-08-08T13:30:00Z"
+        ).json()
+        assert overlap["alert_ids"] == [alert_id]
+        alerts = client.get("/api/inverters/site-001-INV-03/alerts").json()
+        assert len(alerts) == 1
+        assert alerts[0]["lifecycle_status"] == "Acknowledged"
+        assert alerts[0]["onset_timestamp"] == "2026-08-08T10:00:00Z"
+
+
+def test_held_out_evaluation_is_seeded_and_reports_observed_drop() -> None:
+    with make_client() as client:
+        evaluation = client.get("/api/inverter-alerts/evaluation").json()
+        assert evaluation["held_out_generator"] == {
+            "version": "heldout-solar-v1", "seeds": [731, 1291, 2027], "case_count": 24,
+        }
+        held_out = evaluation["held_out"]
+        assert held_out["event_level_precision"] == 1.0
+        assert held_out["event_level_recall"] == .833
+        assert held_out["event_level_f1"] == .909
+        assert held_out["by_anomaly_type"]["intermittent_derating"]["recall"] == 0.0

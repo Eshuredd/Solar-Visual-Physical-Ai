@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from .db import DB_PATH, connect, init_db, rows_to_dicts
 from .inverter_anomaly import CATEGORIES, METHOD_VERSION, detect_anomaly_events, evaluate_synthetic_events
+from .inverter_evaluation import generate_held_out_cases
 from .inverter_monitoring import (
     canonical_utc_timestamp,
     conversion_efficiency_pct,
@@ -323,9 +324,14 @@ def _decode_alert(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     for field in ("expected_measurements", "observed_measurements", "contributing_telemetry_refs", "lifecycle_history"):
         item[field] = json.loads(item[field])
-    start = parse_iso_datetime(item["start_timestamp"])
-    end = parse_iso_datetime(item["end_timestamp"])
-    item["duration_minutes"] = int((end - start).total_seconds() / 60) + 15 if start and end else None
+    item["onset_timestamp"] = item.get("onset_timestamp") or item["start_timestamp"]
+    item["detection_eligible_timestamp"] = item.get("detection_eligible_timestamp") or item["start_timestamp"]
+    item["last_abnormal_timestamp"] = item.get("last_abnormal_timestamp") or item["end_timestamp"]
+    start = parse_iso_datetime(item["onset_timestamp"])
+    end = parse_iso_datetime(item.get("recovery_timestamp") or item["last_abnormal_timestamp"])
+    item["wall_clock_duration_minutes"] = int((end - start).total_seconds() / 60) if start and end else None
+    item["duration_minutes"] = item["wall_clock_duration_minutes"]
+    item["alert_creation_timestamp"] = item["created_at"]
     item["evidence_type"] = "telemetry"
     item["diagnosis_status"] = "unconfirmed"
     return item
@@ -385,24 +391,53 @@ def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None
             "SELECT MAX(t.timestamp) AS end_at FROM inverter_telemetry t JOIN inverters i ON i.inverter_id=t.inverter_id WHERE i.site_id = ?",
             (inverter["site_id"],),
         ).fetchone()
+        history_row = conn.execute(
+            "SELECT MIN(timestamp) AS first_at, MAX(timestamp) AS last_at, COUNT(*) AS samples FROM inverter_telemetry WHERE inverter_id=?",
+            (inverter_id,),
+        ).fetchone()
     analysis_end = normalized_end or (site_end_row["end_at"] if site_end_row else None)
-    events = detect_anomaly_events(inverter, readings, analysis_end=analysis_end)
+    events = detect_anomaly_events(
+        inverter, readings, analysis_end=analysis_end,
+        last_known_timestamp=history_row["last_at"] if history_row else None,
+        has_historical_telemetry=bool(history_row and history_row["samples"]),
+    )
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     alert_ids: list[str] = []
     with connect() as conn:
         for event in events:
             identity = f"{inverter_id}|{event['anomaly_category']}|{event['start_timestamp']}|{METHOD_VERSION}"
             alert_id = f"inv-alert-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex[:12]}"
-            existing = conn.execute("SELECT * FROM inverter_alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+            existing = conn.execute(
+                """SELECT * FROM inverter_alerts WHERE inverter_id=? AND anomaly_category=? AND detection_method=?
+                   AND COALESCE(last_abnormal_timestamp,end_timestamp) >= ?
+                   AND COALESCE(onset_timestamp,start_timestamp) <= ?
+                   ORDER BY created_at LIMIT 1""",
+                (inverter_id, event["anomaly_category"], METHOD_VERSION, event["onset_timestamp"], event["last_abnormal_timestamp"]),
+            ).fetchone()
             if existing:
+                alert_id = existing["alert_id"]
+                old_refs = json.loads(existing["contributing_telemetry_refs"])
+                refs = sorted(set(old_refs) | set(event["contributing_telemetry_refs"]))
+                old_onset = existing["onset_timestamp"] or existing["start_timestamp"]
+                old_eligible = existing["detection_eligible_timestamp"] or existing["start_timestamp"]
+                old_last = existing["last_abnormal_timestamp"] or existing["end_timestamp"]
+                onset = min(old_onset, event["onset_timestamp"])
+                eligible = min(old_eligible, event["detection_eligible_timestamp"])
+                last_abnormal = max(old_last, event["last_abnormal_timestamp"])
+                active_minutes = len(refs) * 15
+                recovery = event.get("recovery_timestamp") or existing["recovery_timestamp"]
+                wall_end = recovery or last_abnormal
+                wall_minutes = max(active_minutes, int((parse_iso_datetime(wall_end) - parse_iso_datetime(onset)).total_seconds() / 60))
                 conn.execute(
                     """UPDATE inverter_alerts SET end_timestamp=?, severity=?, detection_score=?,
                        expected_measurements=?, observed_measurements=?, contributing_telemetry_refs=?,
-                       explanation=?, recommended_investigation=?, updated_at=? WHERE alert_id=?""",
-                    (event["end_timestamp"], event["severity"], event["detection_score"],
+                       explanation=?, recommended_investigation=?, updated_at=?, onset_timestamp=?,
+                       detection_eligible_timestamp=?, last_abnormal_timestamp=?, recovery_timestamp=?,
+                       active_duration_minutes=?, excluded_duration_minutes=? WHERE alert_id=?""",
+                    (last_abnormal, event["severity"], event["detection_score"],
                      json.dumps(event["expected_measurements"]), json.dumps(event["observed_measurements"]),
-                     json.dumps(event["contributing_telemetry_refs"]), event["explanation"],
-                     event["recommended_investigation"], now, alert_id),
+                     json.dumps(refs), event["explanation"], event["recommended_investigation"], now,
+                     onset, eligible, last_abnormal, recovery, active_minutes, max(0, wall_minutes-active_minutes), alert_id),
                 )
             else:
                 history = [{"at": now, "status": "Open", "actor": "Inverter Detection Engine", "note": "Evidence-backed telemetry event created for operator investigation."}]
@@ -412,14 +447,18 @@ def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None
                         start_timestamp, end_timestamp, severity, detection_method, detection_score,
                         expected_measurements, observed_measurements, contributing_telemetry_refs,
                         explanation, recommended_investigation, lifecycle_status, lifecycle_history,
-                        created_at, updated_at, data_provenance)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?)""",
+                        created_at, updated_at, data_provenance, onset_timestamp,
+                        detection_eligible_timestamp, last_abnormal_timestamp, recovery_timestamp,
+                        active_duration_minutes, excluded_duration_minutes)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (alert_id, inverter["site_id"], inverter_id, event["anomaly_category"], event.get("anomaly_subtype"),
                      event["start_timestamp"], event["end_timestamp"], event["severity"], event["detection_method"],
                      event["detection_score"], json.dumps(event["expected_measurements"]),
                      json.dumps(event["observed_measurements"]), json.dumps(event["contributing_telemetry_refs"]),
                      event["explanation"], event["recommended_investigation"], json.dumps(history), now, now,
-                     inverter["data_source"]),
+                     inverter["data_source"], event["onset_timestamp"], event["detection_eligible_timestamp"],
+                     event["last_abnormal_timestamp"], event.get("recovery_timestamp"),
+                     event["active_duration_minutes"], event["excluded_duration_minutes"]),
                 )
             alert_ids.append(alert_id)
         conn.commit()
@@ -447,7 +486,21 @@ def inverter_alert_evaluation(site_id: str = "site-001") -> dict[str, Any]:
     for inverter in inverters:
         for event in detect_anomaly_events(inverter, _read_inverter_telemetry(inverter["inverter_id"]), analysis_end=site_end):
             detected.append({**event, "inverter_id": inverter["inverter_id"]})
-    return evaluate_synthetic_events(detected, scenarios)
+    fixture = evaluate_synthetic_events(detected, scenarios)
+    held_out_data = generate_held_out_cases()
+    held_out_detected: list[dict[str, Any]] = []
+    held_out_scenarios: list[dict[str, Any]] = []
+    for case in held_out_data["cases"]:
+        held_out_scenarios.append(case["scenario"])
+        for event in detect_anomaly_events(case["inverter"], case["readings"], analysis_end=case["analysis_end"]):
+            held_out_detected.append({**event, "inverter_id": case["inverter"]["inverter_id"]})
+    held_out = evaluate_synthetic_events(held_out_detected, held_out_scenarios)
+    return {
+        **fixture,
+        "regression_fixture": fixture,
+        "held_out": held_out,
+        "held_out_generator": {"version": held_out_data["generator_version"], "seeds": held_out_data["seeds"], "case_count": len(held_out_data["cases"])},
+    }
 
 
 @app.get("/api/inverter-alerts/{alert_id}")
@@ -468,9 +521,12 @@ def update_inverter_alert(alert_id: str, patch: InverterAlertPatch) -> dict[str,
         history = json.loads(row["lifecycle_history"])
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         history.append({"at": now, "status": patch.lifecycle_status, "actor": patch.actor, "note": patch.note or f"Status changed from {row['lifecycle_status']}."})
+        acknowledgment = row["acknowledgment_timestamp"]
+        if acknowledgment is None and patch.lifecycle_status in {"Acknowledged", "Investigating", "Resolved"}:
+            acknowledgment = now
         conn.execute(
-            "UPDATE inverter_alerts SET lifecycle_status=?, lifecycle_history=?, updated_at=? WHERE alert_id=?",
-            (patch.lifecycle_status, json.dumps(history), now, alert_id),
+            "UPDATE inverter_alerts SET lifecycle_status=?, lifecycle_history=?, updated_at=?, acknowledgment_timestamp=? WHERE alert_id=?",
+            (patch.lifecycle_status, json.dumps(history), now, acknowledgment, alert_id),
         )
         conn.commit()
     return inverter_alert_detail(alert_id)

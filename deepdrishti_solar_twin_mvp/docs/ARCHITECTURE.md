@@ -98,6 +98,8 @@ records until a future evidence-linking workflow establishes a justified relatio
 - Severity and transparent detection deviation—not a fake confidence score
 - Operator-controlled Open → Acknowledged → Investigating → Resolved lifecycle
 - Append-only lifecycle history and synthetic/real provenance
+- Separate onset, detection-eligibility, last-abnormal, recovery, creation and acknowledgement timestamps
+- Active anomalous duration separated from wall-clock and excluded non-operating duration
 
 Phase 2A rules compare AC against a DC-input conversion model, DC production
 against an independent irradiance/temperature baseline, and temperature against
@@ -105,6 +107,13 @@ ambient plus operating load. Persistence windows turn individual samples into
 events. Known non-fault states are excluded, and missing, stale or invalid data
 is emitted only as `data_quality`. A recovered signal updates the event end but
 does not automatically claim that a physical repair occurred.
+
+Phase 2A.1 deduplicates overlapping analysis windows using category, inverter and
+temporal overlap while preserving operator history. Overnight gaps are bridged
+only without valid recovery evidence. A configured inverter with prior telemetry
+can produce a complete-outage data-quality event; a newly registered device with
+no history cannot. Evaluation uses causal eligibility timestamps and exclusive
+one-to-one event matching.
 
 ## Production target
 
