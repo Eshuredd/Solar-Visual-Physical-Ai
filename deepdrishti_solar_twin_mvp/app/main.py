@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 import io
 import json
 import shutil
+import sqlite3
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +31,8 @@ from .inverter_monitoring import (
     parse_iso_datetime,
     summarize_inverter,
 )
+from .scada_import import ImportValidationError, MAX_UPLOAD_BYTES, commit_scada_import, preview_scada_csv
+from .topology_import import commit_topology_import, preview_topology_csv
 from .vision import analyze_thermal_image
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -47,7 +50,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="DeepDrishti Solar Twin API",
-    version="0.3.0",
+    version="0.4.0",
     description="Runnable equipment-level solar Digital Twin MVP.",
     lifespan=lifespan,
 )
@@ -131,7 +134,21 @@ def _telemetry_range(start: str | None, end: str | None) -> tuple[str | None, st
     return normalized_start, normalized_end
 
 
-def _read_inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+def _dataset_for_inverter(inverter: dict[str, Any], dataset_id: str | None) -> dict[str, Any]:
+    if not dataset_id or dataset_id in {"demo-synthetic-site-001", "dataset-site-001-synthetic"}:
+        return {"dataset_id": "dataset-site-001-synthetic", "site_id": inverter["site_id"], "name": "Bundled synthetic demonstration",
+                "dataset_type": "synthetic_demo", "source_system": "DeepDrishti deterministic seed",
+                "provenance": "synthetic_demo", "timezone": "UTC"}
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM telemetry_datasets WHERE dataset_id=? AND is_selectable=1", (dataset_id,)).fetchone()
+    if not row or row["site_id"] != inverter["site_id"]:
+        raise HTTPException(status_code=404, detail="Telemetry dataset not found for this site")
+    return dict(row)
+
+
+def _read_inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None, dataset_id: str | None = None) -> list[dict[str, Any]]:
+    inverter = get_inverter_or_404(inverter_id)
+    dataset = _dataset_for_inverter(inverter, dataset_id)
     start, end = _telemetry_range(start, end)
     where = ["inverter_id = ?"]
     params: list[Any] = [inverter_id]
@@ -142,9 +159,18 @@ def _read_inverter_telemetry(inverter_id: str, start: str | None = None, end: st
         where.append("timestamp <= ?")
         params.append(end)
     with connect() as conn:
+        if dataset["dataset_type"] == "synthetic_demo":
+            return rows_to_dicts(conn.execute(
+                "SELECT * FROM inverter_telemetry WHERE " + " AND ".join(where) + " ORDER BY timestamp", params,
+            ))
+        where = [item.replace("timestamp", "timestamp_utc") for item in where]
         return rows_to_dicts(conn.execute(
-            "SELECT * FROM inverter_telemetry WHERE " + " AND ".join(where) + " ORDER BY timestamp",
-            params,
+            """SELECT dataset_id,site_id,inverter_id,timestamp_utc AS timestamp,ac_power_kw,dc_power_kw,
+                      ac_voltage_v,ac_current_a,dc_voltage_v,dc_current_a,inverter_temperature_c,
+                      ambient_temperature_c,irradiance_w_m2,operating_state,grid_state,source_system,
+                      source_record_id,data_provenance,data_quality_status,import_id
+               FROM imported_inverter_telemetry WHERE dataset_id=? AND """ + " AND ".join(where) + " ORDER BY timestamp_utc",
+            [dataset["dataset_id"], *params],
         ))
 
 
@@ -338,9 +364,10 @@ def inverter_topology_detail(inverter_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/inverters/{inverter_id}/telemetry")
-def inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def inverter_telemetry(inverter_id: str, start: str | None = None, end: str | None = None, dataset_id: str | None = None) -> dict[str, Any]:
     inverter = get_inverter_or_404(inverter_id)
-    readings = _read_inverter_telemetry(inverter_id, start, end)
+    dataset = _dataset_for_inverter(inverter, dataset_id)
+    readings = _read_inverter_telemetry(inverter_id, start, end, dataset_id)
     rated = float(inverter["rated_ac_power_kw"])
     for reading in readings:
         reading["expected_ac_power_kw"] = expected_ac_power_kw(
@@ -354,15 +381,23 @@ def inverter_telemetry(inverter_id: str, start: str | None = None, end: str | No
         "start": readings[0]["timestamp"] if readings else None,
         "end": readings[-1]["timestamp"] if readings else None,
         "count": len(readings),
-        "data_classification": "synthetic_demo",
+        "dataset": dataset,
+        "data_classification": dataset["dataset_type"],
+        "threshold_calibration_status": "uncalibrated_for_imported_site" if dataset["dataset_type"] == "imported_scada" else "synthetic_demo_thresholds",
+        "quality": {"partial_records": sum(r.get("data_quality_status") == "partial" for r in readings)},
         "readings": readings,
     }
 
 
 @app.get("/api/inverters/{inverter_id}/summary")
-def inverter_summary(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def inverter_summary(inverter_id: str, start: str | None = None, end: str | None = None, dataset_id: str | None = None) -> dict[str, Any]:
     inverter = get_inverter_or_404(inverter_id)
-    return _inverter_summary_payload(inverter, start, end)
+    dataset = _dataset_for_inverter(inverter, dataset_id)
+    payload = summarize_inverter(inverter, _read_inverter_telemetry(inverter_id, start, end, dataset_id))
+    payload["data_classification"] = dataset["dataset_type"]
+    payload["dataset"] = dataset
+    payload["threshold_calibration_status"] = "uncalibrated_for_imported_site" if dataset["dataset_type"] == "imported_scada" else "synthetic_demo_thresholds"
+    return payload
 
 
 def _decode_alert(row: dict[str, Any]) -> dict[str, Any]:
@@ -427,37 +462,41 @@ def inverter_alerts(inverter_id: str, severity: str | None = None, status: str |
 
 
 @app.post("/api/inverters/{inverter_id}/analyze")
-def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None = None, dataset_id: str | None = None) -> dict[str, Any]:
     inverter = get_inverter_or_404(inverter_id)
+    dataset = _dataset_for_inverter(inverter, dataset_id)
     normalized_start, normalized_end = _telemetry_range(start, end)
-    readings = _read_inverter_telemetry(inverter_id, normalized_start, normalized_end)
+    readings = _read_inverter_telemetry(inverter_id, normalized_start, normalized_end, dataset_id)
     with connect() as conn:
-        site_end_row = conn.execute(
-            "SELECT MAX(t.timestamp) AS end_at FROM inverter_telemetry t JOIN inverters i ON i.inverter_id=t.inverter_id WHERE i.site_id = ?",
-            (inverter["site_id"],),
-        ).fetchone()
-        history_row = conn.execute(
-            "SELECT MIN(timestamp) AS first_at, MAX(timestamp) AS last_at, COUNT(*) AS samples FROM inverter_telemetry WHERE inverter_id=?",
-            (inverter_id,),
-        ).fetchone()
+        if dataset["dataset_type"] == "synthetic_demo":
+            site_end_row = conn.execute("SELECT MAX(t.timestamp) AS end_at FROM inverter_telemetry t JOIN inverters i ON i.inverter_id=t.inverter_id WHERE i.site_id = ?", (inverter["site_id"],)).fetchone()
+            history_row = conn.execute("SELECT MIN(timestamp) AS first_at, MAX(timestamp) AS last_at, COUNT(*) AS samples FROM inverter_telemetry WHERE inverter_id=?", (inverter_id,)).fetchone()
+        else:
+            site_end_row = conn.execute("SELECT MAX(timestamp_utc) AS end_at FROM imported_inverter_telemetry WHERE dataset_id=?", (dataset["dataset_id"],)).fetchone()
+            history_row = conn.execute("SELECT MIN(timestamp_utc) AS first_at, MAX(timestamp_utc) AS last_at, COUNT(*) AS samples FROM imported_inverter_telemetry WHERE dataset_id=? AND inverter_id=?", (dataset["dataset_id"],inverter_id)).fetchone()
     analysis_end = normalized_end or (site_end_row["end_at"] if site_end_row else None)
     events = detect_anomaly_events(
         inverter, readings, analysis_end=analysis_end,
         last_known_timestamp=history_row["last_at"] if history_row else None,
         has_historical_telemetry=bool(history_row and history_row["samples"]),
     )
+    method = METHOD_VERSION if dataset["dataset_type"] == "synthetic_demo" else f"{METHOD_VERSION}:uncalibrated-imported"
+    for event in events:
+        event["detection_method"] = method
+        event["expected_measurements"]["threshold_calibration_status"] = "uncalibrated_for_imported_site" if dataset["dataset_type"] == "imported_scada" else "synthetic_demo_thresholds"
+        event["observed_measurements"]["dataset_id"] = dataset["dataset_id"]
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     alert_ids: list[str] = []
     with connect() as conn:
         for event in events:
-            identity = f"{inverter_id}|{event['anomaly_category']}|{event['start_timestamp']}|{METHOD_VERSION}"
+            identity = f"{inverter_id}|{event['anomaly_category']}|{event['start_timestamp']}|{method}|{dataset['dataset_id']}"
             alert_id = f"inv-alert-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex[:12]}"
             existing = conn.execute(
                 """SELECT * FROM inverter_alerts WHERE inverter_id=? AND anomaly_category=? AND detection_method=?
                    AND COALESCE(last_abnormal_timestamp,end_timestamp) >= ?
                    AND COALESCE(onset_timestamp,start_timestamp) <= ?
                    ORDER BY created_at LIMIT 1""",
-                (inverter_id, event["anomaly_category"], METHOD_VERSION, event["onset_timestamp"], event["last_abnormal_timestamp"]),
+                (inverter_id, event["anomaly_category"], method, event["onset_timestamp"], event["last_abnormal_timestamp"]),
             ).fetchone()
             if existing:
                 alert_id = existing["alert_id"]
@@ -501,7 +540,7 @@ def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None
                      event["detection_score"], json.dumps(event["expected_measurements"]),
                      json.dumps(event["observed_measurements"]), json.dumps(event["contributing_telemetry_refs"]),
                      event["explanation"], event["recommended_investigation"], json.dumps(history), now, now,
-                     inverter["data_source"], event["onset_timestamp"], event["detection_eligible_timestamp"],
+                     dataset["provenance"], event["onset_timestamp"], event["detection_eligible_timestamp"],
                      event["last_abnormal_timestamp"], event.get("recovery_timestamp"),
                      event["active_duration_minutes"], event["excluded_duration_minutes"]),
                 )
@@ -510,7 +549,8 @@ def analyze_inverter(inverter_id: str, start: str | None = None, end: str | None
     return {
         "inverter_id": inverter_id, "analysis_start": normalized_start or (readings[0]["timestamp"] if readings else None),
         "analysis_end": analysis_end, "events_detected": len(events), "alert_ids": alert_ids,
-        "method": METHOD_VERSION, "idempotent": True,
+        "method": method, "dataset": dataset, "idempotent": True,
+        "threshold_calibration_status": "uncalibrated_for_imported_site" if dataset["dataset_type"] == "imported_scada" else "synthetic_demo_thresholds",
         "message": "Rule-based investigation alerts only; no root cause has been verified.",
     }
 
@@ -1100,8 +1140,116 @@ def export_site_csv(site_id: str) -> StreamingResponse:
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers=headers)
 
 
+def _require_demo_import_guard(demo_mode: bool, acknowledgment: str | None) -> None:
+    if not demo_mode or acknowledgment != "acknowledged":
+        raise HTTPException(
+            status_code=403,
+            detail="This MVP has no production authentication. Set demo_mode=true and send X-DeepDrishti-Demo-Operator: acknowledged.",
+        )
+
+
+async def _safe_csv(file: UploadFile) -> bytes:
+    if file.content_type not in {"text/csv", "application/csv", "application/vnd.ms-excel", "text/plain", "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail="Only CSV uploads are accepted")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="CSV exceeds the 2 MB upload limit")
+    return content
+
+
+@app.post("/api/sites/{site_id}/data-imports/scada/preview")
+async def scada_import_preview(
+    site_id: str, file: UploadFile = File(...), mapping_json: str = Form(...), units_json: str = Form("{}"),
+    timezone_name: str = Form("UTC"), source_system: str = Form("operator_csv"), demo_mode: bool = Form(False),
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    get_site_or_404(site_id); _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    try:
+        mapping, units = json.loads(mapping_json), json.loads(units_json)
+        if not isinstance(mapping, dict) or not isinstance(units, dict): raise ValueError
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="mapping_json and units_json must be JSON objects") from exc
+    try:
+        with connect() as conn:
+            return preview_scada_csv(conn, site_id=site_id, filename=Path(file.filename or "upload.csv").name,
+                                     content=await _safe_csv(file), mapping=mapping, units=units,
+                                     timezone_name=timezone_name, source_system=source_system[:120])
+    except ImportValidationError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sites/{site_id}/data-imports/topology/preview")
+async def topology_import_preview(
+    site_id: str, file: UploadFile = File(...), source_system: str = Form("operator_csv"),
+    mapping_version: str = Form(...), effective_date: str | None = Form(None), demo_mode: bool = Form(False),
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    get_site_or_404(site_id); _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    try:
+        with connect() as conn:
+            return preview_topology_csv(conn, site_id=site_id, filename=Path(file.filename or "upload.csv").name,
+                                        content=await _safe_csv(file), source_system=source_system[:120],
+                                        mapping_version=mapping_version[:120], effective_date=effective_date)
+    except (ImportValidationError, sqlite3.IntegrityError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sites/{site_id}/data-imports/{import_id}/commit")
+def commit_data_import(site_id: str, import_id: str, demo_mode: bool = False,
+                       x_deepdrishti_demo_operator: str | None = Header(default=None)) -> dict[str, Any]:
+    get_site_or_404(site_id); _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    with connect() as conn:
+        record = conn.execute("SELECT import_type FROM data_imports WHERE import_id=? AND site_id=?", (import_id,site_id)).fetchone()
+        if not record: raise HTTPException(status_code=404, detail="Import not found for this site")
+        try:
+            return commit_scada_import(conn, import_id) if record["import_type"] == "scada_csv" else commit_topology_import(conn, import_id)
+        except (ImportValidationError, sqlite3.IntegrityError) as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/sites/{site_id}/data-imports")
+def data_import_history(site_id: str) -> list[dict[str, Any]]:
+    get_site_or_404(site_id)
+    with connect() as conn:
+        records = rows_to_dicts(conn.execute("SELECT * FROM data_imports WHERE site_id=? ORDER BY created_at DESC", (site_id,)))
+    for item in records:
+        item["report"] = json.loads(item.pop("report_json")); item.pop("mapping_json"); item.pop("options_json")
+    return records
+
+
+@app.get("/api/sites/{site_id}/data-imports/{import_id}")
+def data_import_detail(site_id: str, import_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        record = conn.execute("SELECT * FROM data_imports WHERE import_id=? AND site_id=?", (import_id,site_id)).fetchone()
+        if not record: raise HTTPException(status_code=404, detail="Import not found for this site")
+        result = dict(record); result["report"] = json.loads(result.pop("report_json")); result["mapping"] = json.loads(result.pop("mapping_json")); result["options"] = json.loads(result.pop("options_json"))
+        result["rejections"] = rows_to_dicts(conn.execute("SELECT row_number,raw_json,reasons_json FROM data_import_rejections WHERE import_id=? ORDER BY row_number LIMIT 100", (import_id,)))
+    for row in result["rejections"]: row["raw"] = json.loads(row.pop("raw_json")); row["reasons"] = json.loads(row.pop("reasons_json"))
+    return result
+
+
+@app.get("/api/sites/{site_id}/data-imports/{import_id}/rejections.csv")
+def data_import_rejections(site_id: str, import_id: str) -> StreamingResponse:
+    with connect() as conn:
+        exists = conn.execute("SELECT 1 FROM data_imports WHERE import_id=? AND site_id=?", (import_id,site_id)).fetchone()
+        if not exists: raise HTTPException(status_code=404, detail="Import not found for this site")
+        rows = list(conn.execute("SELECT row_number,raw_json,reasons_json FROM data_import_rejections WHERE import_id=? ORDER BY row_number", (import_id,)))
+    output=io.StringIO(); writer=csv.writer(output); writer.writerow(["row_number","reasons","source_record"])
+    for row in rows: writer.writerow([row["row_number"], "; ".join(json.loads(row["reasons_json"])), row["raw_json"]])
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{import_id}-rejections.csv"'})
+
+
+@app.get("/api/sites/{site_id}/telemetry-datasets")
+def telemetry_datasets(site_id: str) -> list[dict[str, Any]]:
+    get_site_or_404(site_id)
+    with connect() as conn: records = rows_to_dicts(conn.execute("SELECT * FROM telemetry_datasets WHERE site_id=? AND is_selectable=1 ORDER BY created_at", (site_id,)))
+    return records
+
+
 @app.post("/api/reset")
-def reset_demo() -> dict[str, Any]:
+def reset_demo(demo_mode: bool = False) -> dict[str, Any]:
+    if not demo_mode:
+        raise HTTPException(status_code=400, detail="Explicit demo_mode=true is required")
+    with connect() as conn:
+        if conn.execute("SELECT 1 FROM data_imports WHERE status='committed' LIMIT 1").fetchone():
+            raise HTTPException(status_code=409, detail="Reset refused: committed imported data is present. Demo reset never deletes imported customer data.")
     init_db(reset=True)
     return {"status": "reset", "message": "Demo data restored"}
 

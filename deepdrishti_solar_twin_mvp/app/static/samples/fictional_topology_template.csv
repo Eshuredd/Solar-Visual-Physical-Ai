@@ -1,0 +1,8 @@
+record_type,site_id,block_code,display_name,expected_row_count,row_number,module_position_count,inverter_id,mppt_id,input_index,string_id,string_index,asset_group_id,module_start,module_end
+block,fictional-site,F1,Fictional Block 1,2,,,,,,,,,,
+row,fictional-site,F1,F1 Row 1,,1,34,,,,,,,,
+row,fictional-site,F1,F1 Row 2,,2,36,,,,,,,,
+mppt,fictional-site,,, ,,,fictional-site-INV-01,FIC-MPPT-01,1,,,,,
+string,fictional-site,,,,,,,FIC-MPPT-01,,FIC-STRING-01,1,,,
+asset_group,fictional-site,F1,F1 Row 1 modules 1-18,,1,,,,,,FIC-GROUP-01,1,18
+string_asset_group,fictional-site,,,,,,,,,FIC-STRING-01,,FIC-GROUP-01,,

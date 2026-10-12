@@ -46,7 +46,7 @@ def test_topology_seed_is_idempotent_and_migrates_missing_tables() -> None:
         }
     assert repeated == original == {
         "site_blocks": 4, "inverter_mppts": 84, "pv_strings": 168,
-        "physical_asset_groups": 168, "string_asset_groups": 168,
+        "physical_asset_groups": 216, "string_asset_groups": 216,
     }
 
 
@@ -55,9 +55,9 @@ def test_asset_counts_are_database_derived_and_unknown_is_explicit() -> None:
         mapped = client.get("/api/sites/site-001/assets").json()
         assert mapped["hierarchy"] == {
             "site": "Sunridge Solar Park", "inverters": 12, "blocks": 4,
-            "mppts": 84, "strings": 168, "rows": 72, "modules": 2304,
+            "mppts": 84, "strings": 168, "rows": 72, "modules": 2448,
         }
-        assert mapped["topology_coverage"]["mapping_classification"] == "synthetic_demo"
+        assert mapped["topology_coverage"]["mapping_classification"] == "synthetic_topology"
         assert mapped["topology_coverage"]["is_verified_as_built"] is False
 
         unknown = client.get("/api/sites/site-002/assets").json()
@@ -73,13 +73,14 @@ def test_inverter_topology_is_site_scoped_and_supports_variable_inputs() -> None
         assert first["blocks"] == ["B1"]
         assert first["mppt_count"] == 6 and first["string_count"] == 12
         assert second["mppt_count"] == 7 and second["string_count"] == 14
-        assert first["mapped_module_count"] == second["mapped_module_count"] == 192
+        assert first["mapped_module_count"] == second["mapped_module_count"] == 204
         assert all(item["mapping_classification"] == "synthetic_demo" for item in first["mppts"])
 
     with connect() as conn:
         with pytest.raises(sqlite3.IntegrityError, match="site mismatch"):
             conn.execute(
-                """INSERT INTO inverter_mppts VALUES
+                """INSERT INTO inverter_mppts
+                   (mppt_id,site_id,inverter_id,input_index,label,mapping_classification,provenance) VALUES
                    ('bad-mppt','site-002','site-001-INV-01',99,'Bad','unverified','test')"""
             )
 

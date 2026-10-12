@@ -1,0 +1,7 @@
+site_id,inverter_id,timestamp,ac_power,dc_power,irradiance,inverter_temperature,operating_state,grid_state,source_record_id
+site-001,site-001-INV-01,2026-01-15 10:00:00,4200000,4400000,720,51.2,Running,Connected,FIC-001
+site-001,site-001-INV-01,2026-01-15 10:15:00,4180000,4380000,728,52.0,Running,Connected,FIC-002
+site-001,site-001-INV-02,2026-01-15 10:00:00,2900000,4370000,721,52.1,Derated,Connected,FIC-003
+site-001,site-001-INV-02,2026-01-15 10:15:00,0,4360000,730,52.8,Fault,Connected,FIC-004
+site-001,site-001-INV-02,2026-01-15 10:15:00,0,4360000,730,52.8,Fault,Connected,FIC-004
+site-001,UNKNOWN-INVERTER,not-a-time,-4,0,2000,999,Fault,Disconnected,FIC-BAD

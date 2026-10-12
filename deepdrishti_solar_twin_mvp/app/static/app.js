@@ -10,6 +10,11 @@ const state = {
   inspections: [],
   tasks: [],
   assets: null,
+  dataImports: [],
+  telemetryDatasets: [],
+  scadaFile: null,
+  scadaHeaders: [],
+  importPreview: null,
   drawerId: null,
   drawerData: null,
   inverterPanel: null,
@@ -32,6 +37,7 @@ const navItems = [
   ["tasks", "Tasks", "clipboard"],
   ["analytics", "Analytics", "chart"],
   ["assets", "Assets", "box"],
+  ["data", "Data onboarding", "upload"],
   ["field", "Field app", "phone"],
 ];
 
@@ -162,18 +168,22 @@ async function init() {
 
 async function loadSiteData(siteId) {
   state.selectedSiteId = siteId;
-  const [site, anomalies, inspections, tasks, assets] = await Promise.all([
+  const [site, anomalies, inspections, tasks, assets, dataImports, telemetryDatasets] = await Promise.all([
     api(`/api/sites/${siteId}`),
     api(`/api/sites/${siteId}/anomalies`),
     api(`/api/sites/${siteId}/inspections`),
     api(`/api/tasks?site_id=${encodeURIComponent(siteId)}`),
     api(`/api/sites/${siteId}/assets`),
+    api(`/api/sites/${siteId}/data-imports`),
+    api(`/api/sites/${siteId}/telemetry-datasets`),
   ]);
   state.site = site;
   state.anomalies = anomalies;
   state.inspections = inspections;
   state.tasks = tasks;
   state.assets = assets;
+  state.dataImports = dataImports;
+  state.telemetryDatasets = telemetryDatasets;
 }
 
 function populateSitePicker() {
@@ -232,6 +242,7 @@ function render() {
     tasks: renderTasks,
     analytics: renderAnalytics,
     assets: renderAssets,
+    data: renderDataOnboarding,
     field: renderField,
   };
   content.innerHTML = (views[state.view] || renderPortfolio)();
@@ -607,24 +618,26 @@ function renderAnomalyTable(items) {
   return `<div class="map-stage" style="overflow:auto;background:#081711"><table class="data-table"><thead><tr><th>Asset</th><th>Anomaly</th><th>Priority</th><th>Status</th><th>Confidence</th><th>ΔT</th><th>Affected kW</th><th>Annual impact</th><th></th></tr></thead><tbody>${items.map(item=>`<tr><td class="mono">${escapeHtml(item.asset_id)}</td><td><span class="table-title"><strong>${escapeHtml(item.anomaly_type)}</strong><small>${escapeHtml(item.category)}</small></span></td><td>${priorityPill(item.priority)}</td><td>${statusPill(item.status)}</td><td>${Math.round(item.confidence*100)}%</td><td>${item.delta_t?`${item.delta_t}°C`:'—'}</td><td>${formatNumber(item.affected_kw,2)}</td><td>${formatCurrency(item.annual_revenue_loss)}</td><td><button class="button small" onclick="openAnomaly('${item.id}')">Review</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
-async function openInverter(inverterId) {
+async function openInverter(inverterId, datasetId = "dataset-site-001-synthetic") {
   state.drawerId = null;
   state.drawerData = null;
-  state.inverterPanel = { loading: true, inverterId };
+  state.inverterPanel = { loading: true, inverterId, datasetId };
   renderOverlays();
   try {
-    await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze`, { method: "POST" });
-    const [inverter, telemetry, alerts, topology, mlScores, mlComparison] = await Promise.all([
+    const query = `?dataset_id=${encodeURIComponent(datasetId)}`;
+    await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze${query}`, { method: "POST" });
+    const [inverter, summary, telemetry, alerts, topology, mlScores, mlComparison] = await Promise.all([
       api(`/api/inverters/${encodeURIComponent(inverterId)}`),
-      api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/summary${query}`),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry${query}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/alerts`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/topology`),
-      api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-scores`).catch(error => ({ enabled:false, reason:error.message })),
-      api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-comparison`).catch(error => ({ enabled:false, reason:error.message })),
+      datasetId === "dataset-site-001-synthetic" ? api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-scores`).catch(error => ({ enabled:false, reason:error.message })) : Promise.resolve({enabled:false,reason:"Experimental ML is not run across imported datasets."}),
+      datasetId === "dataset-site-001-synthetic" ? api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-comparison`).catch(error => ({ enabled:false, reason:error.message })) : Promise.resolve({enabled:false,reason:"Dataset boundary preserved."}),
     ]);
     const active = alerts.find(item => item.lifecycle_status !== "Resolved") || alerts[0];
     const evidence = active ? await api(`/api/inverter-alerts/${encodeURIComponent(active.alert_id)}/evidence`) : null;
-    state.inverterPanel = { loading: false, inverter, summary: inverter.summary, readings: telemetry.readings, alerts, topology, evidence, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
+    state.inverterPanel = { loading: false, inverter, summary, telemetry, datasetId, readings: telemetry.readings, alerts, topology, evidence, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
   } catch (error) {
     state.inverterPanel = { loading: false, inverterId, error: error.message };
   }
@@ -779,8 +792,9 @@ function renderInverterDrawer() {
     <aside class="detail-drawer inverter-drawer" role="dialog" aria-modal="true" aria-label="Inverter monitoring details">
       <header class="drawer-header"><div class="drawer-title"><span>${escapeHtml(inverter.block_info || 'Unassigned block')} · ${formatNumber(inverter.rated_ac_power_kw,0)} kW AC</span><h3>${escapeHtml(inverter.name)} monitoring</h3></div><button class="icon-button" onclick="closeInverter()">${icon("close")}</button></header>
       <div class="drawer-body">
-        <div class="chip-row">${statusPill(summary.historical_health || summary.status)}<span class="tag">Current state: ${escapeHtml(summary.current_operating_state || latest.operating_state || 'No data')}</span><span class="tag warning">${activeAlerts.length} active alert${activeAlerts.length===1?'':'s'}</span><span class="tag warning">Synthetic demo data</span></div>
-        <div class="synthetic-notice strong">${icon("info")} These are deterministic simulated readings, not actual sensors or a confirmed fault diagnosis.</div>
+        <div class="form-field"><label>Telemetry dataset (never combined)</label><select class="select-input" onchange="openInverter('${inverter.inverter_id}',this.value)">${state.telemetryDatasets.map(d=>`<option value="${d.dataset_id}" ${d.dataset_id===panel.datasetId?'selected':''}>${escapeHtml(d.name)} · ${escapeHtml(d.dataset_type)}</option>`).join('')}</select></div>
+        <div class="chip-row">${statusPill(summary.historical_health || summary.status)}<span class="tag">Current state: ${escapeHtml(summary.current_operating_state || latest.operating_state || 'No data')}</span><span class="tag warning">${activeAlerts.length} active alert${activeAlerts.length===1?'':'s'}</span><span class="tag warning">${escapeHtml(summary.data_classification.replaceAll('_',' '))}</span></div>
+        <div class="synthetic-notice strong">${icon("info")} ${summary.data_classification==='imported_scada'?'Imported source data. Existing rule thresholds are explicitly uncalibrated for this site and do not establish a maintenance diagnosis.':'These are deterministic simulated readings, not actual sensors or a confirmed fault diagnosis.'}</div>
         <div class="detail-section"><div class="detail-section-title">Latest reading · ${escapeHtml(latest.timestamp || 'unavailable')}</div><div class="detail-metrics inverter-metrics">
           <div class="detail-metric"><span>AC output</span><strong>${formatNumber(latest.ac_power_kw,1)} kW</strong></div>
           <div class="detail-metric"><span>DC input</span><strong>${formatNumber(latest.dc_power_kw,1)} kW</strong></div>
@@ -949,6 +963,46 @@ function renderAssets() {
         </div>
       </section>
     </div>`;
+}
+
+function renderDataOnboarding() {
+  setPage("SCADA and topology onboarding", `Solar intelligence / ${state.site.name} / Data`);
+  const fields = ["site_id","inverter_id","timestamp","ac_power","dc_power","ac_voltage","ac_current","dc_voltage","dc_current","inverter_temperature","ambient_temperature","irradiance","operating_state","grid_state","source_record_id"];
+  const required = new Set(["site_id","inverter_id","timestamp","ac_power"]);
+  const option = (field, header) => `<option value="${escapeHtml(header)}" ${header.toLowerCase()===field.toLowerCase()?'selected':''}>${escapeHtml(header)}</option>`;
+  const preview = state.importPreview;
+  return `<div class="page-stack">
+    <section class="page-header"><div><h2>Bring operational data into a governed dataset.</h2><p>Preview first, normalize units and timestamps, quarantine invalid records, then explicitly commit. Imported data never merges silently with the fictional demo stream.</p></div><span class="tag warning">Demo access guard · not production authentication</span></section>
+    <div class="synthetic-notice strong">${icon("alert")} Upload is enabled only after explicit demo-operator acknowledgement. Deployments must replace this guard with customer authentication, authorization, malware scanning and managed object storage.</div>
+    <section class="dashboard-grid equal">
+      <article class="panel"><header class="panel-header"><div><h3>1 · SCADA CSV</h3><p>Maximum 2 MB / 20,000 rows · UTF-8 CSV</p></div>${icon("upload")}</header><div class="panel-body">
+        <div class="form-grid"><div class="form-field full"><label>Choose source file</label><input class="text-input" type="file" accept=".csv,text/csv" onchange="handleScadaFile(this)"></div>
+        <div class="form-field"><label>Source system</label><input id="scada-source" class="text-input" value="${escapeHtml(state.site.name)} operator export"></div><div class="form-field"><label>Timezone for naive timestamps</label><input id="scada-timezone" class="text-input" value="Asia/Kolkata"></div></div>
+        ${state.scadaHeaders.length ? `<div class="detail-section"><div class="detail-section-title">Column mapping</div><div class="form-grid">${fields.map(field=>`<div class="form-field"><label>${field}${required.has(field)?' *':''}</label><select id="map-${field}" class="select-input"><option value="">Not provided</option>${state.scadaHeaders.map(h=>option(field,h)).join('')}</select></div>`).join('')}<div class="form-field"><label>AC power unit</label><select id="unit-ac_power" class="select-input"><option>kW</option><option>W</option><option>MW</option></select></div><div class="form-field"><label>DC power unit</label><select id="unit-dc_power" class="select-input"><option>kW</option><option>W</option><option>MW</option></select></div></div></div>` : '<div class="empty-indicators">Choose a CSV to map its headers.</div>'}
+      </div><footer class="drawer-footer"><button class="button primary" onclick="previewScadaImport()" ${state.scadaFile?'':'disabled'}>${icon("eye")} Validate preview</button></footer></article>
+      <article class="panel"><header class="panel-header"><div><h3>2 · Validation report</h3><p>Nothing is persisted as telemetry until confirmation</p></div>${preview?statusPill(preview.status):''}</header><div class="panel-body">${preview ? `<div class="metric-strip" style="grid-template-columns:repeat(3,1fr)"><div class="stat-card"><span>Accepted</span><strong>${preview.accepted_records}</strong></div><div class="stat-card"><span>Rejected</span><strong>${preview.rejected_records}</strong></div><div class="stat-card"><span>Duplicates</span><strong>${preview.duplicate_records}</strong></div></div><div class="recommendation" style="margin-top:14px"><strong>Quality and provenance</strong><p>${escapeHtml(preview.quality?.time_coverage?.start || 'No valid time coverage')} → ${escapeHtml(preview.quality?.time_coverage?.end || '—')} · ${preview.quality?.partial_measurement_records || 0} partial records. Null optional sensors remain null.</p></div>${preview.rejection_preview?.length?`<div class="detail-section"><div class="detail-section-title">Quarantined examples</div>${preview.rejection_preview.map(r=>`<p class="detail-copy">Row ${r.row_number}: ${escapeHtml(r.reasons.join('; '))}</p>`).join('')}</div>`:''}` : '<div class="empty-state"><div><div class="empty-icon">CSV</div><p>A validation report will appear here.</p></div></div>'}</div>${preview && preview.status==='previewed'?`<footer class="drawer-footer"><button class="button primary" onclick="commitDataImport('${preview.import_id}')">Confirm and import accepted rows</button></footer>`:''}</article>
+    </section>
+    <section class="panel"><header class="panel-header"><div><h3>Dataset and import history</h3><p>Immutable source identity, classification and quality report</p></div><span class="tag">${state.telemetryDatasets.length} selectable dataset${state.telemetryDatasets.length===1?'':'s'}</span></header><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Created</th><th>File</th><th>Type</th><th>Status</th><th>Accepted</th><th>Rejected</th><th>Source</th></tr></thead><tbody>${state.dataImports.map(item=>`<tr><td>${formatDate(item.created_at)}</td><td>${escapeHtml(item.filename)}</td><td>${escapeHtml(item.import_type)}</td><td>${statusPill(item.status)}</td><td>${item.accepted_records}</td><td>${item.rejected_records}${item.rejected_records?` · <a href="/api/sites/${state.selectedSiteId}/data-imports/${item.import_id}/rejections.csv">CSV</a>`:''}</td><td>${escapeHtml(item.source_system)}</td></tr>`).join('') || '<tr><td colspan="7">No imports have been previewed for this site.</td></tr>'}</tbody></table></div></div></section>
+    <section class="panel"><header class="panel-header"><div><h3>Topology CSV</h3><p>Use the documented row-oriented template for block, row, MPPT, string and physical-range records.</p></div><a class="button" href="/static/samples/fictional_topology_template.csv" download>${icon("download")} Template</a></header><div class="panel-body"><p class="detail-copy">Topology imports are classified <strong>imported unverified</strong>. Completeness is derived from declared row layouts and mapped ranges; verification requires reviewed engineering as-built evidence across every link.</p></div></section>
+  </div>`;
+}
+
+async function handleScadaFile(input) {
+  state.scadaFile = input.files?.[0] || null; state.importPreview = null; state.scadaHeaders = [];
+  if (state.scadaFile) state.scadaHeaders = (await state.scadaFile.slice(0,8192).text()).split(/\r?\n/,1)[0].split(',').map(x=>x.trim().replace(/^"|"$/g,''));
+  render();
+}
+
+async function previewScadaImport() {
+  if (!state.scadaFile) return showToast("Choose a SCADA CSV first", "error");
+  const fields=["site_id","inverter_id","timestamp","ac_power","dc_power","ac_voltage","ac_current","dc_voltage","dc_current","inverter_temperature","ambient_temperature","irradiance","operating_state","grid_state","source_record_id"];
+  const mapping=Object.fromEntries(fields.map(f=>[f,document.getElementById(`map-${f}`)?.value||""]));
+  const form=new FormData(); form.append("file",state.scadaFile); form.append("mapping_json",JSON.stringify(mapping)); form.append("units_json",JSON.stringify({ac_power:document.getElementById("unit-ac_power").value,dc_power:document.getElementById("unit-dc_power").value})); form.append("timezone_name",document.getElementById("scada-timezone").value); form.append("source_system",document.getElementById("scada-source").value); form.append("demo_mode","true");
+  try { state.importPreview=await api(`/api/sites/${state.selectedSiteId}/data-imports/scada/preview`,{method:"POST",headers:{"X-DeepDrishti-Demo-Operator":"acknowledged"},body:form}); await loadSiteData(state.selectedSiteId); render(); showToast("Preview completed; review before committing","success"); } catch(error){showToast(error.message,"error")}
+}
+
+async function commitDataImport(importId) {
+  try { state.importPreview=await api(`/api/sites/${state.selectedSiteId}/data-imports/${importId}/commit?demo_mode=true`,{method:"POST",headers:{"X-DeepDrishti-Demo-Operator":"acknowledged"}}); await loadSiteData(state.selectedSiteId); render(); showToast("Imported dataset is now selectable","success"); } catch(error){showToast(error.message,"error")}
 }
 
 function renderField() {
@@ -1182,7 +1236,7 @@ function showToast(message, type = "info") {
 
 async function resetDemo() {
   try {
-    await api("/api/reset", { method: "POST" });
+    await api("/api/reset?demo_mode=true", { method: "POST" });
     state.portfolio = await api("/api/portfolio");
     state.sites = await api("/api/sites");
     await loadSiteData("site-001");

@@ -1,5 +1,7 @@
 # DeepDrishti Solar Twin — Architecture
 
+Phase 3B adds transactional SCADA/topology onboarding, variable row layouts and explicit dataset boundaries. See [PHASE3B_DATA_INGESTION.md](PHASE3B_DATA_INGESTION.md) for canonical schemas, validation and security boundaries.
+
 ## Product loop
 
 ```text

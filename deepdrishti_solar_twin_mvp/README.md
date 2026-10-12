@@ -46,6 +46,10 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Experimental leakage-controlled statistical and Isolation Forest review candidates, kept separate from operational alerts
 - Site-scoped inverter → MPPT → string → physical-group topology with explicit provenance and coverage
 - Read-only electrical/inspection evidence correlation and audited human association review
+- Preview/confirm SCADA CSV ingestion with unit/timezone normalization, quarantine and quality reports
+- Row-aware variable layouts, imported-topology validation and weakest-link verification
+- Selectable telemetry datasets that keep fictional, imported and ML-evaluation data separate
+- Safe demo reset that refuses to delete committed imports
 
 ### Runnable image-analysis demonstration
 
@@ -145,6 +149,10 @@ python3 -m app.train_inverter_ml
 ```
 
 The API never trains a model. It loads the trusted local artifact when present and otherwise returns a clear ML-disabled response. The inverter drawer labels novelty scores and candidate windows as experimental review aids; they do not create, update or resolve operational alerts. See [docs/PHASE2B_ML_EVALUATION.md](docs/PHASE2B_ML_EVALUATION.md) for the leakage audit, frozen partitions and measured comparison. The final result favors the existing deterministic rules over ML for operational use.
+
+## Phase 3B data onboarding
+
+The **Data onboarding** view provides an explicit preview → validation → confirmation flow for SCADA CSVs. Imported rule results are marked uncalibrated for the site and never become automatic maintenance diagnoses. See [docs/PHASE3B_DATA_INGESTION.md](docs/PHASE3B_DATA_INGESTION.md) for the canonical schema, topology format, API, security boundary and remaining deployment inputs. Bundled samples under `app/static/samples/` are fictional.
 
 ## Recommended demo sequence for your boss
 

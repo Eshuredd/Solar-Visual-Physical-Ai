@@ -182,6 +182,23 @@ def init_db(reset: bool = False) -> None:
                 PRIMARY KEY(site_id, block_code)
             );
 
+            CREATE TABLE IF NOT EXISTS block_rows (
+                site_id TEXT NOT NULL,
+                block_code TEXT NOT NULL,
+                row_number INTEGER NOT NULL CHECK(row_number > 0),
+                module_position_count INTEGER NOT NULL CHECK(module_position_count > 0),
+                layout_label TEXT,
+                mapping_classification TEXT NOT NULL CHECK(mapping_classification IN
+                    ('verified_as_built','synthetic_demo','unverified')),
+                review_status TEXT NOT NULL CHECK(review_status IN
+                    ('synthetic','imported_unverified','reviewed','verified_as_built')),
+                provenance TEXT NOT NULL,
+                mapping_version TEXT NOT NULL,
+                effective_date TEXT,
+                PRIMARY KEY(site_id, block_code, row_number),
+                FOREIGN KEY(site_id, block_code) REFERENCES site_blocks(site_id, block_code) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS inverter_mppts (
                 mppt_id TEXT PRIMARY KEY,
                 site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -260,6 +277,84 @@ def init_db(reset: bool = False) -> None:
                 recorded_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS telemetry_datasets (
+                dataset_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                name TEXT NOT NULL,
+                dataset_type TEXT NOT NULL CHECK(dataset_type IN
+                    ('synthetic_demo','imported_scada','synthetic_ml_evaluation')),
+                source_system TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                import_id TEXT,
+                is_selectable INTEGER NOT NULL DEFAULT 1 CHECK(is_selectable IN (0,1))
+            );
+
+            CREATE TABLE IF NOT EXISTS data_imports (
+                import_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                import_type TEXT NOT NULL CHECK(import_type IN ('scada_csv','topology_csv')),
+                filename TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                source_system TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('previewed','committed','failed','cancelled')),
+                mapping_json TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                total_records INTEGER NOT NULL,
+                accepted_records INTEGER NOT NULL,
+                rejected_records INTEGER NOT NULL,
+                duplicate_records INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                committed_at TEXT,
+                authorization_mode TEXT NOT NULL DEFAULT 'unauthenticated_demo_acknowledgment',
+                UNIQUE(site_id, import_type, file_sha256)
+            );
+
+            CREATE TABLE IF NOT EXISTS data_import_staging (
+                import_id TEXT NOT NULL REFERENCES data_imports(import_id) ON DELETE CASCADE,
+                row_number INTEGER NOT NULL,
+                normalized_json TEXT NOT NULL,
+                PRIMARY KEY(import_id, row_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS data_import_rejections (
+                import_id TEXT NOT NULL REFERENCES data_imports(import_id) ON DELETE CASCADE,
+                row_number INTEGER NOT NULL,
+                raw_json TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                PRIMARY KEY(import_id, row_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS imported_inverter_telemetry (
+                dataset_id TEXT NOT NULL REFERENCES telemetry_datasets(dataset_id) ON DELETE RESTRICT,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE RESTRICT,
+                timestamp_utc TEXT NOT NULL,
+                original_timestamp TEXT NOT NULL,
+                original_timezone TEXT NOT NULL,
+                ac_power_kw REAL NOT NULL CHECK(ac_power_kw >= 0 AND ac_power_kw <= 100000),
+                dc_power_kw REAL CHECK(dc_power_kw >= 0 AND dc_power_kw <= 100000),
+                ac_voltage_v REAL CHECK(ac_voltage_v >= 0 AND ac_voltage_v <= 1500),
+                ac_current_a REAL CHECK(ac_current_a >= 0 AND ac_current_a <= 100000),
+                dc_voltage_v REAL CHECK(dc_voltage_v >= 0 AND dc_voltage_v <= 2000),
+                dc_current_a REAL CHECK(dc_current_a >= 0 AND dc_current_a <= 100000),
+                inverter_temperature_c REAL CHECK(inverter_temperature_c >= -40 AND inverter_temperature_c <= 150),
+                ambient_temperature_c REAL CHECK(ambient_temperature_c >= -60 AND ambient_temperature_c <= 80),
+                irradiance_w_m2 REAL CHECK(irradiance_w_m2 >= 0 AND irradiance_w_m2 <= 1500),
+                operating_state TEXT,
+                grid_state TEXT,
+                source_system TEXT NOT NULL,
+                source_record_id TEXT,
+                data_provenance TEXT NOT NULL DEFAULT 'imported_scada',
+                data_quality_status TEXT NOT NULL,
+                import_id TEXT NOT NULL REFERENCES data_imports(import_id) ON DELETE RESTRICT,
+                PRIMARY KEY(dataset_id, inverter_id, timestamp_utc),
+                UNIQUE(site_id, inverter_id, timestamp_utc),
+                UNIQUE(import_id, source_record_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inverters_site ON inverters(site_id);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_timestamp ON inverter_telemetry(timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_state ON inverter_telemetry(inverter_id, operating_state, timestamp);
@@ -274,6 +369,10 @@ def init_db(reset: bool = False) -> None:
             CREATE INDEX IF NOT EXISTS idx_associations_alert ON alert_finding_associations(alert_id, review_status);
             CREATE INDEX IF NOT EXISTS idx_associations_anomaly ON alert_finding_associations(anomaly_id, review_status);
             CREATE INDEX IF NOT EXISTS idx_association_events_association ON alert_finding_association_events(association_id, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_block_rows_layout ON block_rows(site_id,block_code,row_number);
+            CREATE INDEX IF NOT EXISTS idx_datasets_site ON telemetry_datasets(site_id,dataset_type,created_at);
+            CREATE INDEX IF NOT EXISTS idx_imports_site ON data_imports(site_id,import_type,created_at);
+            CREATE INDEX IF NOT EXISTS idx_imported_telemetry_range ON imported_inverter_telemetry(dataset_id,inverter_id,timestamp_utc);
 
             CREATE TRIGGER IF NOT EXISTS trg_mppt_site_insert
             BEFORE INSERT ON inverter_mppts
@@ -287,8 +386,17 @@ def init_db(reset: bool = False) -> None:
             BEFORE INSERT ON pv_strings
             WHEN (SELECT site_id FROM inverter_mppts WHERE mppt_id=NEW.mppt_id) != NEW.site_id
             BEGIN SELECT RAISE(ABORT, 'MPPT and string site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_string_site_update
+            BEFORE UPDATE OF site_id, mppt_id ON pv_strings
+            WHEN (SELECT site_id FROM inverter_mppts WHERE mppt_id=NEW.mppt_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'MPPT and string site mismatch'); END;
             CREATE TRIGGER IF NOT EXISTS trg_string_group_site_insert
             BEFORE INSERT ON string_asset_groups
+            WHEN (SELECT site_id FROM pv_strings WHERE string_id=NEW.string_id) != NEW.site_id
+              OR (SELECT site_id FROM physical_asset_groups WHERE asset_group_id=NEW.asset_group_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'string and asset group site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_string_group_site_update
+            BEFORE UPDATE OF site_id, string_id, asset_group_id ON string_asset_groups
             WHEN (SELECT site_id FROM pv_strings WHERE string_id=NEW.string_id) != NEW.site_id
               OR (SELECT site_id FROM physical_asset_groups WHERE asset_group_id=NEW.asset_group_id) != NEW.site_id
             BEGIN SELECT RAISE(ABORT, 'string and asset group site mismatch'); END;
@@ -297,9 +405,15 @@ def init_db(reset: bool = False) -> None:
             WHEN (SELECT site_id FROM inverter_alerts WHERE alert_id=NEW.alert_id) != NEW.site_id
               OR (SELECT site_id FROM anomalies WHERE id=NEW.anomaly_id) != NEW.site_id
             BEGIN SELECT RAISE(ABORT, 'alert and finding site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_association_site_update
+            BEFORE UPDATE OF site_id, alert_id, anomaly_id ON alert_finding_associations
+            WHEN (SELECT site_id FROM inverter_alerts WHERE alert_id=NEW.alert_id) != NEW.site_id
+              OR (SELECT site_id FROM anomalies WHERE id=NEW.anomaly_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'alert and finding site mismatch'); END;
             """
         )
         migrate_inverter_alerts(conn)
+        migrate_phase3b_topology(conn)
         count = conn.execute("SELECT COUNT(*) AS c FROM sites").fetchone()["c"]
         if count == 0:
             seed_database(conn)
@@ -307,6 +421,7 @@ def init_db(reset: bool = False) -> None:
             seed_demo_inverters(conn)
             seed_phase2_scenarios(conn)
             seed_demo_topology(conn)
+            seed_demo_dataset(conn)
 
 
 def migrate_inverter_alerts(conn: sqlite3.Connection) -> None:
@@ -334,6 +449,133 @@ def migrate_inverter_alerts(conn: sqlite3.Connection) -> None:
              excluded_duration_minutes=COALESCE(excluded_duration_minutes,0)
            WHERE onset_timestamp IS NULL OR detection_eligible_timestamp IS NULL
               OR last_abnormal_timestamp IS NULL OR active_duration_minutes IS NULL"""
+    )
+    conn.commit()
+
+
+def migrate_phase3b_topology(conn: sqlite3.Connection) -> None:
+    """Add review/version metadata and row-aware ranges to Phase 3A topology."""
+    additions = {
+        "site_blocks": {
+            "review_status": "TEXT", "mapping_version": "TEXT", "effective_date": "TEXT", "import_id": "TEXT",
+        },
+        "inverter_mppts": {
+            "review_status": "TEXT", "mapping_version": "TEXT", "effective_date": "TEXT", "import_id": "TEXT",
+        },
+        "pv_strings": {
+            "review_status": "TEXT", "mapping_version": "TEXT", "effective_date": "TEXT", "import_id": "TEXT",
+        },
+        "physical_asset_groups": {
+            "row_number": "INTEGER", "review_status": "TEXT", "mapping_version": "TEXT",
+            "effective_date": "TEXT", "import_id": "TEXT",
+        },
+        "string_asset_groups": {
+            "review_status": "TEXT", "mapping_version": "TEXT", "effective_date": "TEXT", "import_id": "TEXT",
+        },
+    }
+    for table, fields in additions.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, sql_type in fields.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        conn.execute(
+            f"""UPDATE {table} SET
+                 review_status=COALESCE(review_status,CASE WHEN mapping_classification='synthetic_demo' THEN 'synthetic' ELSE 'imported_unverified' END),
+                 mapping_version=COALESCE(mapping_version,'phase3a-v1')"""
+        )
+
+    # Replace only the prior deterministic demo ranges; imported/customer rows
+    # are never touched by this migration or the demo seeder.
+    legacy = "phase3a_deterministic_demo_topology_v1"
+    if conn.execute(
+        "SELECT 1 FROM physical_asset_groups WHERE provenance=? AND row_number IS NULL LIMIT 1", (legacy,)
+    ).fetchone():
+        conn.execute("DELETE FROM string_asset_groups WHERE provenance=?", (legacy,))
+        conn.execute("DELETE FROM physical_asset_groups WHERE provenance=?", (legacy,))
+        conn.execute("DELETE FROM pv_strings WHERE provenance=?", (legacy,))
+        conn.execute("DELETE FROM inverter_mppts WHERE provenance=?", (legacy,))
+        conn.execute("DELETE FROM block_rows WHERE provenance=?", (legacy,))
+        conn.execute("DELETE FROM site_blocks WHERE provenance=?", (legacy,))
+
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS trg_asset_group_site_insert;
+        DROP TRIGGER IF EXISTS trg_asset_group_site_update;
+        DROP TRIGGER IF EXISTS trg_asset_group_overlap_insert;
+        DROP TRIGGER IF EXISTS trg_asset_group_overlap_update;
+        DROP TRIGGER IF EXISTS trg_asset_group_range_insert;
+        DROP TRIGGER IF EXISTS trg_asset_group_range_update;
+        DROP TRIGGER IF EXISTS trg_asset_group_consistency_insert;
+        DROP TRIGGER IF EXISTS trg_asset_group_consistency_update;
+        DROP TRIGGER IF EXISTS trg_block_row_site_update;
+        DROP TRIGGER IF EXISTS trg_block_row_capacity_update;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_site_insert
+        BEFORE INSERT ON physical_asset_groups
+        WHEN NOT EXISTS (SELECT 1 FROM block_rows r WHERE r.site_id=NEW.site_id
+          AND r.block_code=NEW.block_code AND r.row_number=NEW.row_number)
+        BEGIN SELECT RAISE(ABORT, 'asset group row is not registered for site'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_site_update
+        BEFORE UPDATE OF site_id,block_code,row_number ON physical_asset_groups
+        WHEN NOT EXISTS (SELECT 1 FROM block_rows r WHERE r.site_id=NEW.site_id
+          AND r.block_code=NEW.block_code AND r.row_number=NEW.row_number)
+        BEGIN SELECT RAISE(ABORT, 'asset group row is not registered for site'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_overlap_insert
+        BEFORE INSERT ON physical_asset_groups
+        WHEN NEW.row_number IS NOT NULL AND EXISTS (
+          SELECT 1 FROM physical_asset_groups g WHERE g.site_id=NEW.site_id
+          AND g.block_code=NEW.block_code AND g.row_number=NEW.row_number
+          AND g.asset_group_id!=NEW.asset_group_id
+          AND NEW.module_start <= g.module_end AND NEW.module_end >= g.module_start)
+        BEGIN SELECT RAISE(ABORT, 'overlapping physical asset mapping'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_overlap_update
+        BEFORE UPDATE OF site_id,block_code,row_number,module_start,module_end ON physical_asset_groups
+        WHEN NEW.row_number IS NOT NULL AND EXISTS (
+          SELECT 1 FROM physical_asset_groups g WHERE g.asset_group_id!=NEW.asset_group_id
+          AND g.site_id=NEW.site_id AND g.block_code=NEW.block_code AND g.row_number=NEW.row_number
+          AND NEW.module_start <= g.module_end AND NEW.module_end >= g.module_start)
+        BEGIN SELECT RAISE(ABORT, 'overlapping physical asset mapping'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_range_insert
+        BEFORE INSERT ON physical_asset_groups
+        WHEN NEW.row_number IS NOT NULL AND NEW.module_end > (
+          SELECT module_position_count FROM block_rows WHERE site_id=NEW.site_id
+          AND block_code=NEW.block_code AND row_number=NEW.row_number)
+        BEGIN SELECT RAISE(ABORT, 'asset group exceeds row layout'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_range_update
+        BEFORE UPDATE OF site_id,block_code,row_number,module_end ON physical_asset_groups
+        WHEN NEW.row_number IS NOT NULL AND NEW.module_end > (
+          SELECT module_position_count FROM block_rows WHERE site_id=NEW.site_id
+          AND block_code=NEW.block_code AND row_number=NEW.row_number)
+        BEGIN SELECT RAISE(ABORT, 'asset group exceeds row layout'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_consistency_insert
+        BEFORE INSERT ON physical_asset_groups
+        WHEN NEW.mapped_module_count != NEW.module_end-NEW.module_start+1
+          OR NEW.row_start != NEW.row_number OR NEW.row_end != NEW.row_number
+        BEGIN SELECT RAISE(ABORT, 'inconsistent physical asset mapping'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_asset_group_consistency_update
+        BEFORE UPDATE OF row_number,row_start,row_end,module_start,module_end,mapped_module_count ON physical_asset_groups
+        WHEN NEW.mapped_module_count != NEW.module_end-NEW.module_start+1
+          OR NEW.row_start != NEW.row_number OR NEW.row_end != NEW.row_number
+        BEGIN SELECT RAISE(ABORT, 'inconsistent physical asset mapping'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_block_row_site_update
+        BEFORE UPDATE OF site_id,block_code ON block_rows
+        WHEN NOT EXISTS (SELECT 1 FROM site_blocks b WHERE b.site_id=NEW.site_id AND b.block_code=NEW.block_code)
+        BEGIN SELECT RAISE(ABORT, 'block row site mismatch'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_block_row_capacity_update
+        BEFORE UPDATE OF module_position_count ON block_rows
+        WHEN EXISTS (SELECT 1 FROM physical_asset_groups g WHERE g.site_id=NEW.site_id
+          AND g.block_code=NEW.block_code AND g.row_number=NEW.row_number
+          AND g.module_end>NEW.module_position_count)
+        BEGIN SELECT RAISE(ABORT, 'row layout would truncate mapped assets'); END;
+    """)
+    conn.commit()
+
+
+def seed_demo_dataset(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO telemetry_datasets
+           (dataset_id,site_id,name,dataset_type,source_system,provenance,timezone,created_at,is_selectable)
+           VALUES ('dataset-site-001-synthetic','site-001','Bundled fictional demo telemetry',
+                   'synthetic_demo','DeepDrishti simulator','synthetic_demo','UTC',?,1)""",
+        (datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),),
     )
     conn.commit()
 
@@ -420,15 +662,26 @@ def seed_demo_topology(conn: sqlite3.Connection) -> None:
     The records describe only the rendered demo layout. They are intentionally
     classified as synthetic and are not customer as-built documentation.
     """
-    provenance = "phase3a_deterministic_demo_topology_v1"
+    provenance = "phase3b_row_aware_demo_topology_v2"
+    mapping_version = "demo-topology-v2"
+    row_lengths = (32, 34, 36)
     for block_code in ("B1", "B2", "C1", "C2"):
         conn.execute(
             """INSERT OR IGNORE INTO site_blocks
                (site_id, block_code, display_name, expected_row_count,
-                mapping_classification, coverage_status, provenance)
-               VALUES ('site-001', ?, ?, 18, 'synthetic_demo', 'complete', ?)""",
-            (block_code, f"Demo block {block_code}", provenance),
+                mapping_classification, coverage_status, provenance,review_status,mapping_version)
+               VALUES ('site-001', ?, ?, 18, 'synthetic_demo', 'complete', ?,'synthetic',?)""",
+            (block_code, f"Demo block {block_code}", provenance, mapping_version),
         )
+        for row_number in range(1, 19):
+            length = row_lengths[(row_number - 1) % len(row_lengths)]
+            conn.execute(
+                """INSERT OR IGNORE INTO block_rows
+                   (site_id,block_code,row_number,module_position_count,layout_label,
+                    mapping_classification,review_status,provenance,mapping_version)
+                   VALUES ('site-001',?,?,? ,?,'synthetic_demo','synthetic',?,?)""",
+                (block_code, row_number, length, f"Demo row {row_number:02d} ({length} positions)", provenance, mapping_version),
+            )
 
     blocks = ("B1", "B1", "B1", "B2", "B2", "B2", "C1", "C1", "C1", "C2", "C2", "C2")
     mppt_pattern = (6, 7, 8)
@@ -443,15 +696,15 @@ def seed_demo_topology(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """INSERT OR IGNORE INTO inverter_mppts
                    (mppt_id, site_id, inverter_id, input_index, label,
-                    mapping_classification, provenance)
-                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?)""",
-                (mppt_id, inverter_id, input_index, f"MPPT {input_index:02d}", provenance),
+                    mapping_classification, provenance,review_status,mapping_version)
+                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?,'synthetic',?)""",
+                (mppt_id, inverter_id, input_index, f"MPPT {input_index:02d}", provenance, mapping_version),
             )
 
-        # Each inverter covers six rendered rows (192 module positions). String
-        # counts deliberately vary; integer boundaries partition the positions
-        # without overlaps or invented customer serial-number relationships.
-        inverter_start = position * 192 + 1
+        assigned_rows = list(range(position * 6 + 1, position * 6 + 7))
+        capacities = [row_lengths[(row - 1) % len(row_lengths)] for row in assigned_rows]
+        total_positions = sum(capacities)
+        block_prefix = sum(row_lengths[(row - 1) % len(row_lengths)] for row in range(1, assigned_rows[0]))
         for string_number in range(1, string_count + 1):
             mppt_index = (string_number - 1) % mppt_count + 1
             mppt_id = f"{inverter_id}-MPPT-{mppt_index:02d}"
@@ -460,36 +713,43 @@ def seed_demo_topology(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """INSERT OR IGNORE INTO pv_strings
                    (string_id, site_id, mppt_id, string_index, label,
-                    mapping_classification, provenance)
-                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?)""",
-                (string_id, mppt_id, local_string_index, f"String {string_number:02d}", provenance),
+                    mapping_classification, provenance,review_status,mapping_version)
+                   VALUES (?, 'site-001', ?, ?, ?, 'synthetic_demo', ?,'synthetic',?)""",
+                (string_id, mppt_id, local_string_index, f"String {string_number:02d}", provenance, mapping_version),
             )
-            start_ordinal = inverter_start + ((string_number - 1) * 192 // string_count)
-            end_ordinal = inverter_start + (string_number * 192 // string_count) - 1
-            row_start = (start_ordinal - 1) // 32 + 1
-            row_end = (end_ordinal - 1) // 32 + 1
-            module_start = (start_ordinal - 1) % 32 + 1
-            module_end = (end_ordinal - 1) % 32 + 1
-            group_id = f"site-001-{block_code}-GRP-{inverter_number:02d}-{string_number:02d}"
-            conn.execute(
-                """INSERT OR IGNORE INTO physical_asset_groups
-                   (asset_group_id, site_id, block_code, display_name, start_ordinal,
-                    end_ordinal, row_start, row_end, module_start, module_end,
-                    mapped_module_count, mapping_classification, provenance)
-                   VALUES (?, 'site-001', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synthetic_demo', ?)""",
-                (
-                    group_id, block_code, f"{block_code} positions {start_ordinal}-{end_ordinal}",
-                    start_ordinal, end_ordinal, row_start, row_end, module_start, module_end,
-                    end_ordinal - start_ordinal + 1, provenance,
-                ),
-            )
-            conn.execute(
-                """INSERT OR IGNORE INTO string_asset_groups
-                   (site_id, string_id, asset_group_id, relationship_type,
-                    mapping_classification, provenance)
-                   VALUES ('site-001', ?, ?, 'feeds', 'synthetic_demo', ?)""",
-                (string_id, group_id, provenance),
-            )
+            local_start = (string_number - 1) * total_positions // string_count + 1
+            local_end = string_number * total_positions // string_count
+            cursor = 1
+            segment = 0
+            for row_number, capacity in zip(assigned_rows, capacities):
+                row_first, row_last = cursor, cursor + capacity - 1
+                overlap_start, overlap_end = max(local_start, row_first), min(local_end, row_last)
+                cursor += capacity
+                if overlap_start > overlap_end:
+                    continue
+                segment += 1
+                module_start = overlap_start - row_first + 1
+                module_end = overlap_end - row_first + 1
+                start_ordinal = block_prefix + overlap_start
+                end_ordinal = block_prefix + overlap_end
+                group_id = f"site-001-{block_code}-GRP-{inverter_number:02d}-{string_number:02d}-{segment:02d}"
+                conn.execute(
+                    """INSERT OR IGNORE INTO physical_asset_groups
+                       (asset_group_id,site_id,block_code,display_name,start_ordinal,end_ordinal,
+                        row_start,row_end,module_start,module_end,mapped_module_count,
+                        mapping_classification,provenance,row_number,review_status,mapping_version)
+                       VALUES (?,'site-001',?,?,?,?,?,?, ?,?,?, 'synthetic_demo',?,?,'synthetic',?)""",
+                    (group_id, block_code, f"{block_code} row {row_number} modules {module_start}-{module_end}",
+                     start_ordinal, end_ordinal, row_number, row_number, module_start, module_end,
+                     module_end - module_start + 1, provenance, row_number, mapping_version),
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO string_asset_groups
+                       (site_id,string_id,asset_group_id,relationship_type,mapping_classification,
+                        provenance,review_status,mapping_version)
+                       VALUES ('site-001',?,?,'feeds','synthetic_demo',?,'synthetic',?)""",
+                    (string_id, group_id, provenance, mapping_version),
+                )
     conn.commit()
 
 
