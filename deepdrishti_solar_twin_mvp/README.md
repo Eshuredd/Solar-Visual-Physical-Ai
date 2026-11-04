@@ -50,6 +50,8 @@ This is original DeepDrishti code and synthetic imagery. It uses the broad produ
 - Row-aware variable layouts, imported-topology validation and weakest-link verification
 - Selectable telemetry datasets that keep fictional, imported and ML-evaluation data separate
 - Safe demo reset that refuses to delete committed imports
+- Inverter RGB and calibrated-temperature comparison directly in the existing drawer
+- Private visual evidence, persisted inspection history and append-only human review events
 
 ### Runnable image-analysis demonstration
 
@@ -153,6 +155,10 @@ The API never trains a model. It loads the trusted local artifact when present a
 ## Phase 3B data onboarding
 
 The **Data onboarding** view provides an explicit preview → validation → confirmation flow for SCADA CSVs. Imported rule results are marked uncalibrated for the site and never become automatic maintenance diagnoses. See [docs/PHASE3B_DATA_INGESTION.md](docs/PHASE3B_DATA_INGESTION.md) for the canonical schema, topology format, API, security boundary and remaining deployment inputs. Bundled samples under `app/static/samples/` are fictional.
+
+## Phase 3C inverter visual review
+
+The inverter drawer includes deterministic RGB reference comparison and calibrated thermal-matrix comparison with real backend-generated overlays, explicit saving, review history and telemetry evidence. It is not a trained defect classifier and never creates operational alerts or maintenance diagnoses. See [docs/PHASE3C_INVERTER_VISION_UI.md](docs/PHASE3C_INVERTER_VISION_UI.md).
 
 ## Recommended demo sequence for your boss
 

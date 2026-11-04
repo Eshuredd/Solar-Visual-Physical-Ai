@@ -2,6 +2,8 @@
 
 Phase 3B adds transactional SCADA/topology onboarding, variable row layouts and explicit dataset boundaries. See [PHASE3B_DATA_INGESTION.md](PHASE3B_DATA_INGESTION.md) for canonical schemas, validation and security boundaries.
 
+Phase 3C adds private, site-scoped inverter RGB/thermal comparison evidence and append-only human review history without coupling candidates to operational alerts. See [PHASE3C_INVERTER_VISION_UI.md](PHASE3C_INVERTER_VISION_UI.md).
+
 ## Product loop
 
 ```text

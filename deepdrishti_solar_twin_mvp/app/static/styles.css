@@ -2776,6 +2776,27 @@ img {
 
 @keyframes shimmer { to { transform: translateX(100%); } }
 
+.inverter-visual-section { overflow: hidden; }
+.visual-mode-tabs,
+.visual-upload-grid,
+.visual-evidence-grid,
+.visual-review-controls { display: grid; gap: 10px; }
+.visual-mode-tabs { grid-template-columns: repeat(2,minmax(0,1fr)); margin-bottom: 10px; }
+.visual-upload-grid { grid-template-columns: repeat(2,minmax(0,1fr)); margin: 12px 0; }
+.visual-upload-grid label { display: grid; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.visual-upload-grid input[type="file"] { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.025); font-size: 10px; }
+.visual-evidence-grid { grid-template-columns: repeat(2,minmax(0,1fr)); margin: 12px 0; }
+.visual-evidence-grid figure { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #020805; }
+.visual-evidence-grid figure.annotated { grid-column: 1/-1; }
+.visual-evidence-grid img { display: block; width: 100%; max-height: 300px; object-fit: contain; }
+.visual-evidence-grid figcaption { padding: 8px 10px; color: var(--muted); font-size: 9px; }
+.visual-candidate-list { display: grid; gap: 9px; margin: 12px 0; }
+.visual-candidate-card { display: grid; grid-template-columns: minmax(0,1fr) minmax(190px,.65fr); gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.visual-candidate-card strong,.visual-candidate-card small { display: block; }
+.visual-candidate-card small { margin-top: 5px; color: var(--muted); line-height: 1.45; }
+.visual-review-controls .textarea-input { min-height: 62px; }
+.visual-result { margin-top: 13px; }
+
 @media (max-width: 1320px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .site-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2840,6 +2861,7 @@ img {
   .donut-wrap { grid-template-columns: 1fr; justify-items: center; }
   .form-grid { grid-template-columns: 1fr; }
   .form-field.full { grid-column: auto; }
+  .visual-candidate-card { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 560px) {
@@ -2861,4 +2883,6 @@ img {
   .site-picker-wrap { min-width: 0; }
   .phone-shell { width: 100%; }
   .page-actions .button { flex: 1 1 auto; }
+  .visual-upload-grid,.visual-evidence-grid { grid-template-columns: 1fr; }
+  .visual-evidence-grid figure.annotated { grid-column: auto; }
 }

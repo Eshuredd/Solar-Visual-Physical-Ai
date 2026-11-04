@@ -355,6 +355,61 @@ def init_db(reset: bool = False) -> None:
                 UNIQUE(import_id, source_record_id)
             );
 
+            CREATE TABLE IF NOT EXISTS inverter_visual_inspections (
+                inspection_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                inverter_id TEXT NOT NULL REFERENCES inverters(inverter_id) ON DELETE RESTRICT,
+                modality TEXT NOT NULL CHECK(modality IN ('rgb','thermal')),
+                capture_timestamp TEXT NOT NULL,
+                reference_identifier TEXT NOT NULL,
+                current_identifier TEXT NOT NULL,
+                analysis_method TEXT NOT NULL,
+                analysis_version TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                review_state TEXT NOT NULL CHECK(review_state IN
+                    ('Pending Review','Accepted as Relevant Evidence','Rejected','Needs Further Investigation')),
+                telemetry_dataset_id TEXT REFERENCES telemetry_datasets(dataset_id) ON DELETE RESTRICT,
+                evidence_json TEXT NOT NULL,
+                is_fictional_demo INTEGER NOT NULL DEFAULT 0 CHECK(is_fictional_demo IN (0,1)),
+                preview_token TEXT NOT NULL UNIQUE,
+                UNIQUE(site_id, inspection_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS inverter_visual_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                inspection_id TEXT NOT NULL REFERENCES inverter_visual_inspections(inspection_id) ON DELETE CASCADE,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                candidate_type TEXT NOT NULL,
+                bbox_json TEXT NOT NULL,
+                region_size INTEGER NOT NULL CHECK(region_size > 0),
+                relative_change_score REAL,
+                peak_temperature_rise_c REAL,
+                threshold_value REAL,
+                evidence_location TEXT NOT NULL,
+                detection_method TEXT NOT NULL,
+                automatic_state TEXT NOT NULL DEFAULT 'Automatically Detected Candidate',
+                review_state TEXT NOT NULL CHECK(review_state IN
+                    ('Pending Review','Accepted as Relevant Evidence','Rejected','Needs Further Investigation')),
+                reviewer_label TEXT,
+                reviewer_explanation TEXT,
+                reviewed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS inverter_visual_candidate_review_events (
+                event_id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL REFERENCES inverter_visual_candidates(candidate_id) ON DELETE CASCADE,
+                inspection_id TEXT NOT NULL REFERENCES inverter_visual_inspections(inspection_id) ON DELETE CASCADE,
+                site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+                review_state TEXT NOT NULL CHECK(review_state IN
+                    ('Pending Review','Accepted as Relevant Evidence','Rejected','Needs Further Investigation')),
+                reviewer_label TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                authorization_mode TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inverters_site ON inverters(site_id);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_timestamp ON inverter_telemetry(timestamp);
             CREATE INDEX IF NOT EXISTS idx_inverter_telemetry_state ON inverter_telemetry(inverter_id, operating_state, timestamp);
@@ -373,6 +428,9 @@ def init_db(reset: bool = False) -> None:
             CREATE INDEX IF NOT EXISTS idx_datasets_site ON telemetry_datasets(site_id,dataset_type,created_at);
             CREATE INDEX IF NOT EXISTS idx_imports_site ON data_imports(site_id,import_type,created_at);
             CREATE INDEX IF NOT EXISTS idx_imported_telemetry_range ON imported_inverter_telemetry(dataset_id,inverter_id,timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_visual_inspections_inverter ON inverter_visual_inspections(site_id,inverter_id,capture_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_visual_candidates_inspection ON inverter_visual_candidates(inspection_id,review_state);
+            CREATE INDEX IF NOT EXISTS idx_visual_review_events_candidate ON inverter_visual_candidate_review_events(candidate_id,created_at);
 
             CREATE TRIGGER IF NOT EXISTS trg_mppt_site_insert
             BEFORE INSERT ON inverter_mppts
@@ -410,6 +468,27 @@ def init_db(reset: bool = False) -> None:
             WHEN (SELECT site_id FROM inverter_alerts WHERE alert_id=NEW.alert_id) != NEW.site_id
               OR (SELECT site_id FROM anomalies WHERE id=NEW.anomaly_id) != NEW.site_id
             BEGIN SELECT RAISE(ABORT, 'alert and finding site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_visual_inspection_site_insert
+            BEFORE INSERT ON inverter_visual_inspections
+            WHEN (SELECT site_id FROM inverters WHERE inverter_id=NEW.inverter_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'visual inspection inverter site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_visual_inspection_site_update
+            BEFORE UPDATE OF site_id,inverter_id ON inverter_visual_inspections
+            WHEN (SELECT site_id FROM inverters WHERE inverter_id=NEW.inverter_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'visual inspection inverter site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_visual_candidate_site_insert
+            BEFORE INSERT ON inverter_visual_candidates
+            WHEN (SELECT site_id FROM inverter_visual_inspections WHERE inspection_id=NEW.inspection_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'visual candidate inspection site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_visual_candidate_site_update
+            BEFORE UPDATE OF site_id,inspection_id ON inverter_visual_candidates
+            WHEN (SELECT site_id FROM inverter_visual_inspections WHERE inspection_id=NEW.inspection_id) != NEW.site_id
+            BEGIN SELECT RAISE(ABORT, 'visual candidate inspection site mismatch'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_visual_review_site_insert
+            BEFORE INSERT ON inverter_visual_candidate_review_events
+            WHEN (SELECT site_id FROM inverter_visual_candidates WHERE candidate_id=NEW.candidate_id) != NEW.site_id
+              OR (SELECT inspection_id FROM inverter_visual_candidates WHERE candidate_id=NEW.candidate_id) != NEW.inspection_id
+            BEGIN SELECT RAISE(ABORT, 'visual review candidate site mismatch'); END;
             """
         )
         migrate_inverter_alerts(conn)

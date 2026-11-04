@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 app/data/*.db
+app/data/inverter_visual_evidence/
 app/static/uploads/*
 !app/static/uploads/.gitkeep

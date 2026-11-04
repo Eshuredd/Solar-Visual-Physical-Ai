@@ -626,7 +626,7 @@ async function openInverter(inverterId, datasetId = "dataset-site-001-synthetic"
   try {
     const query = `?dataset_id=${encodeURIComponent(datasetId)}`;
     await api(`/api/inverters/${encodeURIComponent(inverterId)}/analyze${query}`, { method: "POST" });
-    const [inverter, summary, telemetry, alerts, topology, mlScores, mlComparison] = await Promise.all([
+    const [inverter, summary, telemetry, alerts, topology, mlScores, mlComparison, visualInspections] = await Promise.all([
       api(`/api/inverters/${encodeURIComponent(inverterId)}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/summary${query}`),
       api(`/api/inverters/${encodeURIComponent(inverterId)}/telemetry${query}`),
@@ -634,10 +634,11 @@ async function openInverter(inverterId, datasetId = "dataset-site-001-synthetic"
       api(`/api/inverters/${encodeURIComponent(inverterId)}/topology`),
       datasetId === "dataset-site-001-synthetic" ? api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-scores`).catch(error => ({ enabled:false, reason:error.message })) : Promise.resolve({enabled:false,reason:"Experimental ML is not run across imported datasets."}),
       datasetId === "dataset-site-001-synthetic" ? api(`/api/inverters/${encodeURIComponent(inverterId)}/ml-comparison`).catch(error => ({ enabled:false, reason:error.message })) : Promise.resolve({enabled:false,reason:"Dataset boundary preserved."}),
+      api(`/api/inverters/${encodeURIComponent(inverterId)}/visual-inspections`),
     ]);
     const active = alerts.find(item => item.lifecycle_status !== "Resolved") || alerts[0];
     const evidence = active ? await api(`/api/inverter-alerts/${encodeURIComponent(active.alert_id)}/evidence`) : null;
-    state.inverterPanel = { loading: false, inverter, summary, telemetry, datasetId, readings: telemetry.readings, alerts, topology, evidence, mlScores, mlComparison, selectedAlertId: active?.alert_id || null };
+    state.inverterPanel = { loading: false, inverter, summary, telemetry, datasetId, readings: telemetry.readings, alerts, topology, evidence, mlScores, mlComparison, visualInspections, visualMode:"rgb", visualPreview:null, visualLoading:false, selectedAlertId: active?.alert_id || null };
   } catch (error) {
     state.inverterPanel = { loading: false, inverterId, error: error.message };
   }
@@ -772,6 +773,95 @@ async function updateInverterAlert(alertId, lifecycleStatus) {
   } catch (error) { showToast(error.message, "error"); }
 }
 
+function setInverterVisualMode(mode) {
+  if (!state.inverterPanel) return;
+  state.inverterPanel.visualMode = mode;
+  state.inverterPanel.visualPreview = null;
+  renderOverlays();
+}
+
+async function runInverterVisualInspection(modality, demoCase = "") {
+  const panel = state.inverterPanel;
+  if (!panel) return;
+  const form = new FormData();
+  form.append("demo_mode", "true");
+  form.append("dataset_id", panel.datasetId);
+  if (demoCase) form.append("demo_case", demoCase);
+  if (!demoCase) {
+    const reference = document.getElementById(`visual-${modality}-reference`)?.files?.[0];
+    const current = document.getElementById(`visual-${modality}-current`)?.files?.[0];
+    if (!reference || !current) return showToast(`Choose both ${modality === 'rgb' ? 'RGB images' : 'temperature CSV files'}`, "error");
+    form.append("reference", reference); form.append("current", current);
+  }
+  if (modality === "thermal") {
+    form.append("temperature_unit", document.getElementById("thermal-unit")?.value || "Celsius");
+    form.append("delta_threshold_c", document.getElementById("thermal-threshold")?.value || "10");
+  }
+  panel.visualLoading = true; panel.visualPreview = null; renderOverlays();
+  try {
+    panel.visualPreview = await api(`/api/inverters/${encodeURIComponent(panel.inverter.inverter_id)}/visual-inspections/${modality}/preview`, {method:"POST",headers:{"X-DeepDrishti-Demo-Operator":"acknowledged"},body:form});
+    showToast(panel.visualPreview.result.candidate_count ? `${panel.visualPreview.result.candidate_count} review candidate${panel.visualPreview.result.candidate_count===1?'':'s'} localized` : "Comparison completed with no candidate regions", "success");
+  } catch(error) { showToast(error.message,"error"); }
+  panel.visualLoading = false; renderOverlays();
+}
+
+async function saveInverterVisualInspection() {
+  const panel=state.inverterPanel, preview=panel?.visualPreview;
+  if (!preview?.preview_token) return;
+  try {
+    const saved=await api(`/api/inverters/${encodeURIComponent(panel.inverter.inverter_id)}/visual-inspections?demo_mode=true`,{method:"POST",headers:{"X-DeepDrishti-Demo-Operator":"acknowledged"},body:{preview_token:preview.preview_token}});
+    panel.visualPreview=saved;
+    panel.visualInspections=await api(`/api/inverters/${encodeURIComponent(panel.inverter.inverter_id)}/visual-inspections`);
+    renderOverlays(); showToast("Inspection and candidate evidence saved","success");
+  } catch(error){showToast(error.message,"error")}
+}
+
+async function loadInverterVisualInspection(inspectionId) {
+  const panel=state.inverterPanel;
+  if (!panel) return;
+  panel.visualLoading=true; renderOverlays();
+  try {
+    panel.visualPreview=await api(`/api/inverter-visual-inspections/${encodeURIComponent(inspectionId)}?dataset_id=${encodeURIComponent(panel.datasetId)}`);
+    panel.visualMode=panel.visualPreview.modality;
+  } catch(error){showToast(error.message,"error")}
+  panel.visualLoading=false; renderOverlays();
+}
+
+async function reviewInverterVisualCandidate(inspectionId,candidateId) {
+  const stateSelect=document.getElementById(`visual-review-state-${candidateId}`);
+  const note=document.getElementById(`visual-review-note-${candidateId}`)?.value?.trim();
+  if (!note) return showToast("Add a review explanation before recording the decision","error");
+  try {
+    state.inverterPanel.visualPreview=await api(`/api/inverter-visual-inspections/${encodeURIComponent(inspectionId)}/review?demo_mode=true`,{method:"PATCH",headers:{"X-DeepDrishti-Demo-Operator":"acknowledged"},body:{candidate_id:candidateId,review_state:stateSelect.value,reviewer_label:"Demo operator (self-asserted)",explanation:note}});
+    state.inverterPanel.visualInspections=await api(`/api/inverters/${encodeURIComponent(state.inverterPanel.inverter.inverter_id)}/visual-inspections`);
+    renderOverlays(); showToast("Review event appended; operational alerts were not changed","success");
+  } catch(error){showToast(error.message,"error")}
+}
+
+function renderInverterVisualInspection(panel) {
+  const mode=panel.visualMode || "rgb", visual=panel.visualPreview;
+  const result=visual?.result || visual;
+  const evidence=visual?.evidence_urls || visual?.evidence || {};
+  const candidates=visual?.candidates || result?.candidate_regions || [];
+  const saved=Boolean(visual?.inspection_id);
+  const nearest=visual?.telemetry_evidence?.nearest_reading;
+  const resultImages = visual ? (mode === "rgb" ? `
+    <div class="visual-evidence-grid"><figure><img src="${evidence['reference.png']}" alt="Reference inverter image"><figcaption>Reference</figcaption></figure><figure><img src="${evidence['current.png']}" alt="Current inverter image"><figcaption>Current</figcaption></figure><figure class="annotated"><img src="${evidence['annotated.png']}" alt="Current image annotated with candidate bounding boxes"><figcaption>Candidate overlay · pixel-aligned boxes</figcaption></figure></div>` : `
+    <div class="visual-evidence-grid"><figure><img src="${evidence['reference_heatmap.png']}" alt="Reference thermal matrix heatmap"><figcaption>Reference matrix</figcaption></figure><figure><img src="${evidence['current_heatmap.png']}" alt="Current thermal matrix heatmap"><figcaption>Current matrix</figcaption></figure><figure class="annotated"><img src="${evidence['difference_heatmap.png']}" alt="Temperature difference heatmap with candidate boxes"><figcaption>Positive difference heatmap · boxes in matrix coordinates</figcaption></figure></div>`) : "";
+  return `<div class="detail-section inverter-visual-section"><div class="detail-section-title">Visual & Thermal Inspection</div>
+    <div class="visual-mode-tabs"><button class="button small ${mode==='rgb'?'primary':''}" onclick="setInverterVisualMode('rgb')">RGB inspection</button><button class="button small ${mode==='thermal'?'primary':''}" onclick="setInverterVisualMode('thermal')">Thermal inspection</button></div>
+    <div class="synthetic-notice strong">${icon("info")} Deterministic comparison only—not a trained defect classifier. A candidate is not a confirmed fault, root cause, alert or maintenance instruction.</div>
+    ${mode==='rgb'?`<div class="visual-upload-grid"><label>Reference matched view<input id="visual-rgb-reference" type="file" accept="image/png,image/jpeg,image/webp"></label><label>Current matched view<input id="visual-rgb-current" type="file" accept="image/png,image/jpeg,image/webp"></label></div><div class="inline-actions"><button class="button primary" onclick="runInverterVisualInspection('rgb')">Analyze images</button><button class="button" onclick="runInverterVisualInspection('rgb','rgb_change')">Try RGB change demo</button><button class="button" onclick="runInverterVisualInspection('rgb','healthy_unchanged')">Try healthy / unchanged demo</button></div><p class="detail-copy">Use the same inverter, camera viewpoint and comparable lighting. Reflections, shadows and movement may create false candidates.</p>`:`<div class="visual-upload-grid"><label>Reference calibrated CSV<input id="visual-thermal-reference" type="file" accept=".csv,text/csv"></label><label>Current calibrated CSV<input id="visual-thermal-current" type="file" accept=".csv,text/csv"></label><label>Temperature unit<select id="thermal-unit" class="select-input"><option>Celsius</option><option>Fahrenheit</option><option>Kelvin</option></select></label><label>Rise threshold °C<input id="thermal-threshold" class="text-input" type="number" min="0.1" max="100" step="0.1" value="10"></label></div><div class="inline-actions"><button class="button primary" onclick="runInverterVisualInspection('thermal')">Analyze thermal data</button><button class="button" onclick="runInverterVisualInspection('thermal','thermal_rise')">Try thermal rise demo</button></div><p class="detail-copy">Numeric radiometric CSV only. A colorized thermal PNG/JPEG cannot provide calibrated temperatures and is not accepted in this mode.</p>`}
+    ${panel.visualLoading?'<div class="inverter-loading"><div class="skeleton"></div><div class="skeleton"></div></div>':''}
+    ${visual?`<div class="visual-result"><div class="chip-row"><span class="tag ${visual.fictional_demo||visual.is_fictional_demo?'warning':''}">${visual.fictional_demo||visual.is_fictional_demo?'Fictional demonstration data':escapeHtml(visual.provenance||'Saved inspection')}</span><span class="tag ${candidates.length?'warning':'success'}">${candidates.length?`${candidates.length} candidate${candidates.length===1?'':'s'}`:'Normal comparison result · zero candidates'}</span>${saved?statusPill(visual.review_state):''}</div>${resultImages}
+      ${candidates.length?`<div class="visual-candidate-list">${candidates.map((candidate,index)=>`<article class="visual-candidate-card"><div><strong>C${candidate.candidate_index||index+1} · ${escapeHtml(candidate.candidate_type.replaceAll('_',' '))}</strong><small>Box [${(candidate.bbox_xyxy||[]).join(', ')}] · ${candidate.region_size_pixels||candidate.region_size_cells||candidate.region_size} ${mode==='rgb'?'pixels':'cells'}</small><small>${mode==='rgb'?`Relative change ${formatNumber((candidate.relative_change_score||0)*100,1)}%`:`Peak measured rise ${formatNumber(candidate.peak_temperature_rise_c,1)}°C · threshold ${formatNumber(candidate.threshold_c||candidate.threshold_value,1)}°C`}</small><small>${saved?`${escapeHtml(candidate.automatic_state)} · review: ${escapeHtml(candidate.review_state)}`:'Pending human review'}</small></div>${saved?`<div class="visual-review-controls"><select id="visual-review-state-${candidate.candidate_id}" class="select-input"><option>Accepted as Relevant Evidence</option><option>Rejected</option><option>Needs Further Investigation</option></select><textarea id="visual-review-note-${candidate.candidate_id}" class="textarea-input" placeholder="Explain the review decision"></textarea><button class="button small" onclick="reviewInverterVisualCandidate('${visual.inspection_id}','${candidate.candidate_id}')">Record review</button></div>`:''}</article>`).join('')}</div>`:'<div class="recommendation success"><strong>No meaningful candidate region detected</strong><p>This is a normal comparison result, not proof that the inverter is healthy.</p></div>'}
+      <div class="inline-actions">${!saved?`<button class="button primary" onclick="saveInverterVisualInspection()">Save inspection for review</button>`:''}<a class="button" href="${mode==='rgb'?evidence['annotated.png']:evidence['difference_heatmap.png']}" download>Download annotated result</a></div>
+      ${nearest?`<div class="recommendation"><strong>Nearest electrical evidence · ${escapeHtml(visual.telemetry_evidence.dataset.name)}</strong><p>${escapeHtml(nearest.timestamp)} · AC ${formatNumber(nearest.ac_power_kw,1)} kW · DC ${nearest.dc_power_kw==null?'N/A':`${formatNumber(nearest.dc_power_kw,1)} kW`} · inverter temperature ${nearest.inverter_temperature_c==null?'N/A':`${formatNumber(nearest.inverter_temperature_c,1)}°C`} · ${escapeHtml(nearest.operating_state||'state unavailable')} · ${formatNumber(visual.telemetry_evidence.telemetry_timestamp_proximity_minutes,1)} minutes from capture.</p><small>${escapeHtml(visual.telemetry_evidence.correlation_notice)}</small></div>`:''}
+    </div>`:''}
+    <div class="detail-section-title" style="margin-top:16px">Previous inverter visual inspections</div>${panel.visualInspections?.length?`<div class="inverter-alert-list">${panel.visualInspections.map(item=>`<button class="inverter-alert-card" onclick="loadInverterVisualInspection('${item.inspection_id}')"><i class="severity-bar ${item.candidate_count?'medium':'low'}"></i><span><strong>${escapeHtml(item.modality.toUpperCase())} comparison</strong><small>${formatDate(item.capture_timestamp)} · ${item.candidate_count} candidate${item.candidate_count===1?'':'s'} · ${item.is_fictional_demo?'fictional demo':'operator data'}</small></span>${statusPill(item.review_state)}</button>`).join('')}</div>`:'<div class="empty-indicators">No saved inverter visual inspections.</div>'}
+  </div>`;
+}
+
 function renderInverterDrawer() {
   const panel = state.inverterPanel;
   if (!panel) return "";
@@ -807,6 +897,7 @@ function renderInverterDrawer() {
         <div class="detail-section"><div class="detail-section-title">Historical input and output power · kW</div>${inverterChart(panel.readings,[{field:'dc_power_kw',label:'DC input',color:'#5be7d4'},{field:'ac_power_kw',label:'AC output',color:'#9dff75'}],'Historical DC input and AC output power',alerts)}</div>
         <div class="detail-section"><div class="detail-section-title">Expected versus actual AC power · kW</div>${inverterChart(panel.readings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual',color:'#9dff75'}],'Expected versus actual AC power',alerts)}</div>
         ${renderTopologyEvidence(panel, selectedAlert)}
+        ${renderInverterVisualInspection(panel)}
         ${renderExperimentalMl(panel)}
         <div class="detail-section"><div class="detail-section-title">Telemetry anomaly events</div>${alerts.length ? `<div class="inverter-alert-list">${alerts.map(alert=>`<button class="inverter-alert-card ${alert.alert_id===selectedAlert?.alert_id?'selected':''}" onclick="selectInverterAlert('${alert.alert_id}')"><i class="severity-bar ${className(alert.severity)}"></i><span><strong>${escapeHtml(alertLabel(alert.anomaly_category))}</strong><small>${escapeHtml(alert.severity)} · ${formatDate(alert.onset_timestamp || alert.start_timestamp)} · ${alert.active_duration_minutes ?? '—'} active min</small></span>${statusPill(alert.lifecycle_status)}</button>`).join('')}</div>` : `<div class="empty-indicators">No event-based alerts were detected for this period.</div>`}</div>
         ${selectedAlert ? `<div class="detail-section alert-evidence"><div class="detail-section-title">Selected telemetry evidence window</div><div class="chip-row">${priorityPill(selectedAlert.severity)}${statusPill(selectedAlert.lifecycle_status)}<span class="tag">${selectedAlert.active_duration_minutes ?? 0} active min</span><span class="tag">${selectedAlert.wall_clock_duration_minutes ?? selectedAlert.duration_minutes} wall-clock min</span><span class="tag">Unconfirmed cause</span></div><div class="alert-timestamp-grid"><span>Onset<strong>${escapeHtml(selectedAlert.onset_timestamp)}</strong></span><span>Detection eligible<strong>${escapeHtml(selectedAlert.detection_eligible_timestamp)}</strong></span><span>Last abnormal<strong>${escapeHtml(selectedAlert.last_abnormal_timestamp)}</strong></span><span>Recovery<strong>${escapeHtml(selectedAlert.recovery_timestamp || 'Not observed')}</strong></span></div>${inverterChart(evidenceReadings,[{field:'expected_ac_power_kw',label:'Modeled expected',color:'#ffc166'},{field:'ac_power_kw',label:'Actual AC',color:'#9dff75'},{field:'dc_power_kw',label:'DC input',color:'#5be7d4'}],'Telemetry around the selected alert')}<div class="recommendation" style="margin-top:10px"><strong>Evidence-backed explanation</strong><p>${escapeHtml(selectedAlert.explanation)}</p></div><div class="recommendation" style="margin-top:8px"><strong>Investigation recommendation</strong><p>${escapeHtml(selectedAlert.recommended_investigation)}</p></div><div class="inline-actions alert-actions">${['Acknowledged','Investigating','Resolved'].map(status=>`<button class="button small ${selectedAlert.lifecycle_status===status?'primary':''}" onclick="updateInverterAlert('${selectedAlert.alert_id}','${status}')">${status}</button>`).join('')}</div><div class="timeline alert-history">${selectedAlert.lifecycle_history.map(item=>`<div class="timeline-item"><strong>${escapeHtml(item.status)}</strong><p>${escapeHtml(item.note)} · ${escapeHtml(item.actor)}</p><time>${formatDate(item.at)}</time></div>`).join('')}</div></div>`:''}

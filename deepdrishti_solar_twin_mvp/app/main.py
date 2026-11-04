@@ -31,6 +31,18 @@ from .inverter_monitoring import (
     parse_iso_datetime,
     summarize_inverter,
 )
+from .inverter_vision import (
+    METHOD_VERSION as INVERTER_VISION_VERSION,
+    VisionValidationError,
+    analyze_rgb_bytes,
+    analyze_thermal_bytes,
+    create_preview,
+    ensure_storage as ensure_inverter_vision_storage,
+    persist_preview,
+    preview_evidence_path,
+    read_preview,
+    saved_evidence_path,
+)
 from .scada_import import ImportValidationError, MAX_UPLOAD_BYTES, commit_scada_import, preview_scada_csv
 from .topology_import import commit_topology_import, preview_topology_csv
 from .vision import analyze_thermal_image
@@ -41,16 +53,18 @@ UPLOAD_ROOT = STATIC_ROOT / "uploads"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 ML_ARTIFACT_PATH = DEFAULT_ARTIFACT_ROOT / "inverter_anomaly.joblib"
 ML_EVALUATION_PATH = DEFAULT_ARTIFACT_ROOT / "evaluation.json"
+INVERTER_VISION_DEMO_ROOT = STATIC_ROOT / "samples" / "inverter_visual"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    ensure_inverter_vision_storage()
     yield
 
 
 app = FastAPI(
     title="DeepDrishti Solar Twin API",
-    version="0.4.0",
+    version="0.5.0",
     description="Runnable equipment-level solar Digital Twin MVP.",
     lifespan=lifespan,
 )
@@ -102,6 +116,18 @@ class AlertFindingAssociationCreate(BaseModel):
 class AlertFindingAssociationPatch(BaseModel):
     review_status: Literal["Accepted", "Rejected", "Removed"]
     reviewer: str = Field(min_length=2, max_length=120)
+    explanation: str = Field(min_length=5, max_length=3000)
+
+
+class InverterVisualInspectionSave(BaseModel):
+    preview_token: str = Field(min_length=16, max_length=120)
+    capture_timestamp: datetime | None = None
+
+
+class InverterVisualReview(BaseModel):
+    candidate_id: str
+    review_state: Literal["Accepted as Relevant Evidence", "Rejected", "Needs Further Investigation"]
+    reviewer_label: str = Field(min_length=2, max_length=120)
     explanation: str = Field(min_length=5, max_length=3000)
 
 
@@ -881,6 +907,277 @@ def update_anomaly(anomaly_id: str, patch: AnomalyPatch) -> dict[str, Any]:
     return anomaly_detail(anomaly_id)
 
 
+def _visual_preview_response(metadata: dict[str, Any]) -> dict[str, Any]:
+    token = metadata["preview_token"]
+    return {
+        "preview_token": token, "modality": metadata["modality"], "result": metadata["result"],
+        "provenance": metadata["provenance"], "expires_at": metadata["expires_at"],
+        "fictional_demo": metadata["provenance"] == "fictional_demo_fixture",
+        "evidence": {name: f"/api/inverter-visual-previews/{token}/evidence/{name}" for name in metadata["evidence_names"]},
+        "notice": "Candidate regions require human review and are not a trained-model prediction or confirmed equipment fault.",
+    }
+
+
+@app.post("/api/inverters/{inverter_id}/visual-inspections/rgb/preview")
+async def preview_inverter_rgb(
+    inverter_id: str, reference: UploadFile | None = File(default=None), current: UploadFile | None = File(default=None),
+    minimum_channel_difference: float = Form(30.0), demo_case: str | None = Form(None),
+    dataset_id: str | None = Form(None), demo_mode: bool = Form(False),
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    if dataset_id:
+        _dataset_for_inverter(inverter, dataset_id)
+    if demo_case:
+        if demo_case not in {"rgb_change", "healthy_unchanged"}:
+            raise HTTPException(status_code=400, detail="Unknown RGB demo case")
+        reference_name = "inverter_before.png"
+        current_name = "inverter_after.png" if demo_case == "rgb_change" else "inverter_before.png"
+        reference_content = (INVERTER_VISION_DEMO_ROOT / reference_name).read_bytes()
+        current_content = (INVERTER_VISION_DEMO_ROOT / current_name).read_bytes()
+        provenance = "fictional_demo_fixture"
+    else:
+        if reference is None or current is None:
+            raise HTTPException(status_code=400, detail="Both reference and current RGB images are required")
+        reference_name, current_name = Path(reference.filename or "reference").name, Path(current.filename or "current").name
+        reference_content, current_content = await reference.read(), await current.read()
+        provenance = "operator_supplied_upload"
+    try:
+        result, evidence = analyze_rgb_bytes(reference_content, current_content, reference_name=reference_name,
+            current_name=current_name, minimum_channel_difference=minimum_channel_difference)
+        result["input_identifiers"] = {"reference": reference_name, "current": current_name}
+        metadata = create_preview(site_id=inverter["site_id"], inverter_id=inverter_id, modality="rgb",
+            result=result, evidence=evidence, provenance=provenance, dataset_id=dataset_id)
+    except VisionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _visual_preview_response(metadata)
+
+
+@app.post("/api/inverters/{inverter_id}/visual-inspections/thermal/preview")
+async def preview_inverter_thermal(
+    inverter_id: str, reference: UploadFile | None = File(default=None), current: UploadFile | None = File(default=None),
+    temperature_unit: str = Form("Celsius"), delta_threshold_c: float = Form(10.0),
+    demo_case: str | None = Form(None), dataset_id: str | None = Form(None), demo_mode: bool = Form(False),
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    if dataset_id:
+        _dataset_for_inverter(inverter, dataset_id)
+    if demo_case:
+        if demo_case != "thermal_rise":
+            raise HTTPException(status_code=400, detail="Unknown thermal demo case")
+        reference_name, current_name = "thermal_before_celsius.csv", "thermal_after_celsius.csv"
+        reference_content = (INVERTER_VISION_DEMO_ROOT / reference_name).read_bytes()
+        current_content = (INVERTER_VISION_DEMO_ROOT / current_name).read_bytes()
+        temperature_unit, provenance = "Celsius", "fictional_demo_fixture"
+    else:
+        if reference is None or current is None:
+            raise HTTPException(status_code=400, detail="Both reference and current calibrated temperature CSV files are required")
+        reference_name, current_name = Path(reference.filename or "reference.csv").name, Path(current.filename or "current.csv").name
+        if Path(reference_name).suffix.lower() != ".csv" or Path(current_name).suffix.lower() != ".csv":
+            raise HTTPException(status_code=415, detail="Thermal temperature comparison accepts numeric CSV files only")
+        reference_content, current_content = await reference.read(), await current.read()
+        provenance = "operator_supplied_calibrated_matrix_assertion"
+    try:
+        result, evidence = analyze_thermal_bytes(reference_content, current_content, reference_name=reference_name,
+            current_name=current_name, unit=temperature_unit, delta_threshold_c=delta_threshold_c)
+        result["input_identifiers"] = {"reference": reference_name, "current": current_name}
+        metadata = create_preview(site_id=inverter["site_id"], inverter_id=inverter_id, modality="thermal",
+            result=result, evidence=evidence, provenance=provenance, dataset_id=dataset_id)
+    except VisionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _visual_preview_response(metadata)
+
+
+@app.get("/api/inverter-visual-previews/{preview_token}/evidence/{evidence_name}")
+def inverter_visual_preview_evidence(preview_token: str, evidence_name: str) -> FileResponse:
+    try:
+        path = preview_evidence_path(preview_token, evidence_name)
+    except VisionValidationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    media_type = "text/csv" if path.suffix == ".csv" else "image/png"
+    return FileResponse(path, media_type=media_type, filename=path.name if path.suffix == ".csv" else None)
+
+
+def _visual_inspection_payload(conn: sqlite3.Connection, inspection_id: str) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM inverter_visual_inspections WHERE inspection_id=?", (inspection_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Inverter visual inspection not found")
+    item = dict(row)
+    item["parameters"] = json.loads(item.pop("parameters_json"))
+    item["evidence"] = json.loads(item.pop("evidence_json"))
+    candidates = rows_to_dicts(conn.execute(
+        "SELECT * FROM inverter_visual_candidates WHERE inspection_id=? ORDER BY candidate_id", (inspection_id,)
+    ))
+    for candidate in candidates:
+        candidate["bbox_xyxy"] = json.loads(candidate.pop("bbox_json"))
+        candidate["review_history"] = rows_to_dicts(conn.execute(
+            "SELECT * FROM inverter_visual_candidate_review_events WHERE candidate_id=? ORDER BY created_at,rowid",
+            (candidate["candidate_id"],),
+        ))
+    item["candidates"] = candidates
+    item["candidate_count"] = len(candidates)
+    item["evidence_urls"] = {name: f"/api/inverter-visual-inspections/{inspection_id}/evidence/{name}" for name in item["evidence"]}
+    item["review_semantics"] = "Accepted means relevant review evidence only; it is not an authenticated approval, confirmed fault, root cause, alert or maintenance action."
+    return item
+
+
+@app.post("/api/inverters/{inverter_id}/visual-inspections")
+def save_inverter_visual_inspection(
+    inverter_id: str, body: InverterVisualInspectionSave, demo_mode: bool = False,
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inverter_id)
+    _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    try:
+        metadata = read_preview(body.preview_token)
+    except VisionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if metadata["site_id"] != inverter["site_id"] or metadata["inverter_id"] != inverter_id:
+        raise HTTPException(status_code=400, detail="Preview does not belong to the selected site and inverter")
+    with connect() as conn:
+        existing = conn.execute("SELECT inspection_id FROM inverter_visual_inspections WHERE preview_token=?", (body.preview_token,)).fetchone()
+        if existing:
+            return _visual_inspection_payload(conn, existing["inspection_id"])
+    inspection_id = f"inv-vis-{uuid.uuid4().hex[:12]}"
+    _, locations = persist_preview(body.preview_token, inspection_id)
+    result = metadata["result"]
+    capture = body.capture_timestamp or datetime.now(timezone.utc)
+    if capture.tzinfo is None:
+        capture = capture.replace(tzinfo=timezone.utc)
+    captured_at = capture.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    identifiers = result.get("input_identifiers", {})
+    try:
+        with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT INTO inverter_visual_inspections
+                   (inspection_id,site_id,inverter_id,modality,capture_timestamp,reference_identifier,current_identifier,
+                    analysis_method,analysis_version,parameters_json,provenance,created_at,review_state,
+                    telemetry_dataset_id,evidence_json,is_fictional_demo,preview_token)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (inspection_id,inverter["site_id"],inverter_id,metadata["modality"],captured_at,
+                 identifiers.get("reference","reference"),identifiers.get("current","current"),
+                 "deterministic_reference_comparison",INVERTER_VISION_VERSION,
+                 json.dumps({key: result[key] for key in ("threshold_0_255","delta_threshold_c","image_size","matrix_size") if key in result}),
+                 metadata["provenance"],created_at,"Pending Review",metadata.get("dataset_id"),json.dumps(locations),
+                 int(metadata["provenance"] == "fictional_demo_fixture"),body.preview_token),
+            )
+            evidence_name = "annotated.png" if metadata["modality"] == "rgb" else "difference_heatmap.png"
+            for candidate in result["candidate_regions"]:
+                candidate_id = f"inv-vis-cand-{uuid.uuid5(uuid.NAMESPACE_URL, inspection_id + ':' + str(candidate['candidate_index'])).hex[:12]}"
+                conn.execute(
+                    """INSERT INTO inverter_visual_candidates
+                       (candidate_id,inspection_id,site_id,candidate_type,bbox_json,region_size,relative_change_score,
+                        peak_temperature_rise_c,threshold_value,evidence_location,detection_method,review_state)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,'Pending Review')""",
+                    (candidate_id,inspection_id,inverter["site_id"],candidate["candidate_type"],json.dumps(candidate["bbox_xyxy"]),
+                     candidate.get("region_size_pixels",candidate.get("region_size_cells")),candidate.get("relative_change_score"),
+                     candidate.get("peak_temperature_rise_c"),candidate.get("threshold_c",result.get("threshold_0_255")),
+                     locations[evidence_name],candidate["detection_method"]),
+                )
+                conn.execute(
+                    """INSERT INTO inverter_visual_candidate_review_events
+                       VALUES (?,?,?,?,?,'Deterministic comparison engine','Candidate created; human review required.','automated_candidate_creation',?)""",
+                    (f"inv-vis-review-{uuid.uuid4().hex[:12]}",candidate_id,inspection_id,inverter["site_id"],"Pending Review",created_at),
+                )
+            conn.commit()
+            saved = _visual_inspection_payload(conn, inspection_id)
+            saved["telemetry_evidence"] = _visual_telemetry_correlation(saved, metadata.get("dataset_id"))
+            return saved
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail=f"Unable to save visual inspection: {exc}") from exc
+
+
+@app.get("/api/inverters/{inverter_id}/visual-inspections")
+def inverter_visual_inspections(inverter_id: str) -> list[dict[str, Any]]:
+    inverter = get_inverter_or_404(inverter_id)
+    with connect() as conn:
+        records = rows_to_dicts(conn.execute(
+            """SELECT vi.*,COUNT(vc.candidate_id) AS candidate_count
+               FROM inverter_visual_inspections vi LEFT JOIN inverter_visual_candidates vc ON vc.inspection_id=vi.inspection_id
+               WHERE vi.site_id=? AND vi.inverter_id=? GROUP BY vi.inspection_id
+               ORDER BY vi.capture_timestamp DESC,vi.created_at DESC""", (inverter["site_id"],inverter_id),
+        ))
+    for item in records:
+        item["parameters"] = json.loads(item.pop("parameters_json")); item.pop("evidence_json"); item.pop("preview_token")
+    return records
+
+
+def _visual_telemetry_correlation(inspection: dict[str, Any], dataset_id: str | None) -> dict[str, Any]:
+    inverter = get_inverter_or_404(inspection["inverter_id"])
+    chosen = dataset_id or inspection.get("telemetry_dataset_id")
+    dataset = _dataset_for_inverter(inverter, chosen)
+    readings = _read_inverter_telemetry(inverter["inverter_id"], dataset_id=dataset["dataset_id"])
+    capture = parse_iso_datetime(inspection["capture_timestamp"])
+    nearest = min(readings, key=lambda row: abs((parse_iso_datetime(row["timestamp"]) - capture).total_seconds())) if readings and capture else None
+    proximity = abs((parse_iso_datetime(nearest["timestamp"]) - capture).total_seconds()) / 60 if nearest and capture else None
+    if nearest:
+        nearest = {key: nearest.get(key) for key in ("timestamp","ac_power_kw","dc_power_kw","inverter_temperature_c","operating_state","grid_state","data_provenance","source_system")}
+    with connect() as conn:
+        alerts = rows_to_dicts(conn.execute("SELECT * FROM inverter_alerts WHERE inverter_id=? ORDER BY start_timestamp DESC LIMIT 5", (inverter["inverter_id"],)))
+    return {"dataset": dataset, "nearest_reading": nearest, "telemetry_timestamp_proximity_minutes": round(proximity,2) if proximity is not None else None,
+            "recent_rule_alerts": [_decode_alert(row) for row in alerts],
+            "correlation_notice": "Visual and electrical observations are separate review evidence; temporal proximity does not prove a shared root cause."}
+
+
+@app.get("/api/inverter-visual-inspections/{inspection_id}")
+def inverter_visual_inspection_detail(inspection_id: str, dataset_id: str | None = None) -> dict[str, Any]:
+    with connect() as conn:
+        item = _visual_inspection_payload(conn, inspection_id)
+    item["telemetry_evidence"] = _visual_telemetry_correlation(item, dataset_id)
+    item.pop("preview_token", None)
+    return item
+
+
+@app.get("/api/inverter-visual-inspections/{inspection_id}/evidence/{evidence_name}")
+def inverter_visual_saved_evidence(inspection_id: str, evidence_name: str) -> FileResponse:
+    with connect() as conn:
+        item = _visual_inspection_payload(conn, inspection_id)
+    try:
+        path = saved_evidence_path(inspection_id, evidence_name, list(item["evidence"]))
+    except VisionValidationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Saved evidence file is unavailable")
+    return FileResponse(path, media_type="text/csv" if path.suffix == ".csv" else "image/png",
+                        filename=path.name if path.suffix == ".csv" else None)
+
+
+@app.patch("/api/inverter-visual-inspections/{inspection_id}/review")
+def review_inverter_visual_candidate(
+    inspection_id: str, body: InverterVisualReview, demo_mode: bool = False,
+    x_deepdrishti_demo_operator: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_demo_import_guard(demo_mode, x_deepdrishti_demo_operator)
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with connect() as conn:
+        candidate = conn.execute(
+            """SELECT vc.*,vi.inverter_id FROM inverter_visual_candidates vc
+               JOIN inverter_visual_inspections vi ON vi.inspection_id=vc.inspection_id
+               WHERE vc.candidate_id=? AND vc.inspection_id=?""", (body.candidate_id,inspection_id),
+        ).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Visual candidate not found for this inspection")
+        conn.execute("""UPDATE inverter_visual_candidates SET review_state=?,reviewer_label=?,reviewer_explanation=?,reviewed_at=?
+                        WHERE candidate_id=?""", (body.review_state,body.reviewer_label,body.explanation,now,body.candidate_id))
+        conn.execute("""INSERT INTO inverter_visual_candidate_review_events VALUES (?,?,?,?,?,?,?,?,?)""",
+            (f"inv-vis-review-{uuid.uuid4().hex[:12]}",body.candidate_id,inspection_id,candidate["site_id"],body.review_state,
+             body.reviewer_label,body.explanation,"unauthenticated_demo_assertion",now))
+        states = [row[0] for row in conn.execute("SELECT review_state FROM inverter_visual_candidates WHERE inspection_id=?", (inspection_id,))]
+        aggregate = "Needs Further Investigation" if "Needs Further Investigation" in states else (
+            "Pending Review" if "Pending Review" in states else "Accepted as Relevant Evidence" if "Accepted as Relevant Evidence" in states else "Rejected")
+        conn.execute("UPDATE inverter_visual_inspections SET review_state=? WHERE inspection_id=?", (aggregate,inspection_id))
+        conn.commit()
+        result = _visual_inspection_payload(conn, inspection_id)
+    result["telemetry_evidence"] = _visual_telemetry_correlation(result, result.get("telemetry_dataset_id"))
+    result.pop("preview_token", None)
+    return result
+
+
 @app.get("/api/sites/{site_id}/inspections")
 def inspections(site_id: str) -> list[dict[str, Any]]:
     get_site_or_404(site_id)
@@ -1250,6 +1547,8 @@ def reset_demo(demo_mode: bool = False) -> dict[str, Any]:
     with connect() as conn:
         if conn.execute("SELECT 1 FROM data_imports WHERE status='committed' LIMIT 1").fetchone():
             raise HTTPException(status_code=409, detail="Reset refused: committed imported data is present. Demo reset never deletes imported customer data.")
+        if conn.execute("SELECT 1 FROM inverter_visual_inspections LIMIT 1").fetchone():
+            raise HTTPException(status_code=409, detail="Reset refused: saved inverter visual evidence is present. Demo reset never deletes inspection evidence.")
     init_db(reset=True)
     return {"status": "reset", "message": "Demo data restored"}
 
